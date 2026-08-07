@@ -12,8 +12,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { ADAPTER_ENDPOINT_MAP } from "./adapter-endpoint-map";
-import { renderUnsourcedFieldsDoc } from "./unsourced-fields-doc";
+import { ADAPTER_ENDPOINT_MAP, MISSING_SURFACES, unservedMethods } from "./adapter-endpoint-map";
+import { renderAbsentEndpointsDoc, renderUnsourcedFieldsDoc } from "./unsourced-fields-doc";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 const DOC = join(REPO_ROOT, "docs", "product", "unsourced-fields.md");
@@ -48,5 +48,48 @@ describe("docs/product/unsourced-fields.md", () => {
     const doc = readFileSync(DOC, "utf8");
     expect(doc).toContain("look identical on a screen and mean opposite things");
     expect(doc).toContain("Rendering it as a plausible default is the one option that is not");
+  });
+});
+
+describe("docs/product/absent-endpoints.md", () => {
+  const DOC = join(REPO_ROOT, "docs", "product", "absent-endpoints.md");
+
+  it("is in step with the endpoint map", () => {
+    expect(
+      readFileSync(DOC, "utf8"),
+      "the document is stale. Run: cd apps/web && npm run generate:api-docs",
+    ).toBe(renderAbsentEndpointsDoc());
+  });
+
+  it("specifies every unserved method, and none that is served", () => {
+    // Both directions again. A gap with no specification is a gap somebody has to re-derive; a
+    // specification for a method that is now served is worse — it asks for work already done.
+    const specified = MISSING_SURFACES.map((s) => s.method).sort();
+    const unserved = unservedMethods()
+      .map((m) => m.method)
+      .filter((m) => m !== "listSecretRefs")
+      .sort();
+    // `listEvidence` and `listApprovals` are `shaped` — served, but only under a parent the
+    // screen is trying to discover — so they are specified without being unserved.
+    for (const method of unserved) {
+      expect(specified, `${method} has no specification`).toContain(method);
+    }
+    // listSecretRefs is WITHHELD and must never acquire one.
+    expect(specified).not.toContain("listSecretRefs");
+  });
+
+  it("names the scoping for every gap, since scoping is the recurring failure", () => {
+    for (const surface of MISSING_SURFACES) {
+      expect(surface.scoping.length, `${surface.method} has no scoping note`).toBeGreaterThan(30);
+      expect(surface.unblocks.length, `${surface.method} says nothing about what it unblocks`)
+        .toBeGreaterThan(30);
+    }
+  });
+
+  it("keeps the access-profile note about public metadata only", () => {
+    // The one gap whose implementation could leak credential material if specified carelessly.
+    const access = MISSING_SURFACES.find((s) => s.method === "listAccessProfiles");
+    expect(access?.unblocks).toMatch(/public metadata ONLY/i);
+    expect(access?.unblocks).toContain("never be a profile a browser could use");
   });
 });

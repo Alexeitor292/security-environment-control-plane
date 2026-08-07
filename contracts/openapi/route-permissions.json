@@ -1,0 +1,1304 @@
+{
+  "DELETE /api/v1/competitions/{competition_id}/teams/{team_id}": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "DELETE /api/v1/competitions/{competition_id}/teams/{team_id}/members/{member_id}": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "DELETE /api/v1/ranges/{range_id}/teams/{team_id}/members/{member_id}": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/activation-dossiers/{dossier_id}": {
+    "permissions": [
+      "activation_dossier_manage"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/audit": {
+    "permissions": [
+      "audit_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/auth/config": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/change-sets/{approval_id}": {
+    "permissions": [
+      "provisioning_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/competitions/{competition_id}": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/competitions/{competition_id}/challenges": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/competitions/{competition_id}/scoreboard": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/competitions/{competition_id}/submissions": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/competitions/{competition_id}/teams": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/competitions/{competition_id}/teams/{team_id}/members": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/enrollment": {
+    "permissions": [
+      "enrollment_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/enrollment/{enrollment_id}": {
+    "permissions": [
+      "enrollment_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/environment-versions/{version_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/exercises": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/exercises/{exercise_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/exercises/{exercise_id}/instances": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/exercises/{exercise_id}/plan": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/exercises/{exercise_id}/topology": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/instances/{instance_id}/topology": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/manifests": {
+    "permissions": [
+      "provisioning_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/manifests/{manifest_id}": {
+    "permissions": [
+      "provisioning_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/manifests/{manifest_id}/change-sets": {
+    "permissions": [
+      "provisioning_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/manifests/{manifest_id}/operations": {
+    "permissions": [
+      "provisioning_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/me": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/onboarding/{onboarding_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/onboarding/{onboarding_id}/evidence": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/onboarding/{onboarding_id}/preflight": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/plan-generation-authorizations/{authorization_id}": {
+    "permissions": [
+      "plan_generation_manage"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/plan-secret-authorizations/{authorization_id}": {
+    "permissions": [
+      "readiness_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/plugins": {
+    "permissions": [],
+    "state": "open"
+  },
+  "GET /api/v1/providers/capabilities": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/provisioning-operations/{operation_id}": {
+    "permissions": [
+      "provisioning_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/range-operations/{operation_id}": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/range-scenarios": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/range-scenarios/{key}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/range-templates": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/range-templates/{slug}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/ranges": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/challenges": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/competition": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/events": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/operations": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/allocations": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/apply-authorization": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/commands": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/destroy-authorization": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/destroy-plan": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/evidence": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/observation": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/ownership": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/plan": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/readiness": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/reconciliation": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/reset-authorization": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/reset-dispositions": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/reset-plan": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/residue": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/topology": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/verification": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/worker": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/proxmox/workload": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/resources": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/scenario": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/scoreboard": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/teams": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/teams/{team_id}/members": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/ranges/{range_id}/teardown-evidence": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/readonly-preflight": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/readonly-preflight/authorizations": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/readonly-preflight/substrates": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/readonly-preflight/{preflight_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/resolver-activation/authorizations": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/resolver-activation/authorizations/{authorization_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/snapshots/{snapshot_id}": {
+    "permissions": [
+      "inventory_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/snapshots/{snapshot_id}/resources": {
+    "permissions": [
+      "inventory_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/staging-deployments": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/staging-deployments/{deployment_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/staging-deployments/{deployment_id}/bootstrap-availability": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/staging-deployments/{deployment_id}/plan": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/staging-deployments/{deployment_id}/resources": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/staging-deployments/{deployment_id}/verifications": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/staging-labs": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/staging-labs/eligible-substrates": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/staging-labs/{lab_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/staging-labs/{lab_id}/work-items": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/read-only-bootstrap/enrollments/{enrollment_id}/binding-descriptor": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/read-only-bootstrap/enrollments/{enrollment_id}/bundle-descriptor": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/read-only-bootstrap/enrollments/{enrollment_id}/readiness": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/read-only-bootstrap/sessions": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/read-only-bootstrap/sessions/{session_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/read-only-bootstrap/sessions/{session_id}/script": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/read-only-bootstrap/worker-nodes": {
+    "permissions": [
+      "target_discovery_manage"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/target-discovery/read-only-bootstrap/worker-nodes/{node_id}": {
+    "permissions": [
+      "target_discovery_manage"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/target-discovery/{enrollment_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/{enrollment_id}/apply-status": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/{enrollment_id}/bootstrap-availability": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/{enrollment_id}/candidate-plan": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/target-discovery/{enrollment_id}/evidence": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/targets": {
+    "permissions": [],
+    "state": "open"
+  },
+  "GET /api/v1/targets/{target_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/targets/{target_id}/address-spaces": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/targets/{target_id}/onboarding": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/targets/{target_id}/reservations": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/targets/{target_id}/snapshots": {
+    "permissions": [
+      "inventory_read"
+    ],
+    "state": "requires"
+  },
+  "GET /api/v1/targets/{target_id}/toolchain-profiles": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/templates": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/templates/{template_id}/versions": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/toolchain-profiles/{profile_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/topology-authoring/documents/{document_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/topology-authoring/documents/{document_id}/revisions": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/topology-authoring/documents/{document_id}/revisions/{revision_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/topology-authoring/documents/{document_id}/revisions/{revision_id}/validation": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/worker-identity/registrations": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /api/v1/worker-identity/registrations/{registration_id}": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /health": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "GET /readiness": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/activation-dossiers/{dossier_id}/approve": {
+    "permissions": [
+      "activation_dossier_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/activation-dossiers/{dossier_id}/evidence": {
+    "permissions": [
+      "activation_dossier_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/activation-dossiers/{dossier_id}/revoke": {
+    "permissions": [
+      "activation_dossier_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/change-sets/{approval_id}/approve": {
+    "permissions": [
+      "provisioning_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/change-sets/{approval_id}/reject": {
+    "permissions": [
+      "provisioning_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/competitions/{competition_id}/reset-scores": {
+    "permissions": [
+      "exercise_reset"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/competitions/{competition_id}/start": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/competitions/{competition_id}/stop": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/competitions/{competition_id}/submissions": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/competitions/{competition_id}/teams": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/competitions/{competition_id}/teams/{team_id}/members": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/definitions/validate": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/enrollment/invitations": {
+    "permissions": [
+      "enrollment_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/enrollment/{enrollment_id}/bind": {
+    "permissions": [
+      "enrollment_progress"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/enrollment/{enrollment_id}/exchange/bind": {
+    "permissions": [
+      "enrollment_progress"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/enrollment/{enrollment_id}/exchange/result": {
+    "permissions": [
+      "enrollment_progress"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/enrollment/{enrollment_id}/healthy": {
+    "permissions": [
+      "enrollment_progress"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/enrollment/{enrollment_id}/offer": {
+    "permissions": [
+      "enrollment_progress"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/enrollment/{enrollment_id}/recover": {
+    "permissions": [
+      "enrollment_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/enrollment/{enrollment_id}/result": {
+    "permissions": [
+      "enrollment_progress"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/enrollment/{enrollment_id}/revoke": {
+    "permissions": [
+      "enrollment_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/enrollment/{enrollment_id}/verify": {
+    "permissions": [
+      "enrollment_progress"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/environment-versions/publish": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/exercises": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/exercises/{exercise_id}/deploy": {
+    "permissions": [
+      "exercise_apply"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/exercises/{exercise_id}/destroy": {
+    "permissions": [
+      "exercise_destroy"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/exercises/{exercise_id}/instances/{instance_id}/reset": {
+    "permissions": [
+      "exercise_reset"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/exercises/{exercise_id}/plan": {
+    "permissions": [
+      "plan_generate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/exercises/{exercise_id}/validate": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/onboarding/{onboarding_id}/activate": {
+    "permissions": [
+      "onboarding_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/onboarding/{onboarding_id}/approve": {
+    "permissions": [
+      "onboarding_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/onboarding/{onboarding_id}/preflight": {
+    "permissions": [
+      "onboarding_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/onboarding/{onboarding_id}/reject": {
+    "permissions": [
+      "onboarding_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/onboarding/{onboarding_id}/retire": {
+    "permissions": [
+      "onboarding_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/onboarding/{onboarding_id}/submit": {
+    "permissions": [
+      "onboarding_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/plan-generation-authorizations/{authorization_id}/approve": {
+    "permissions": [
+      "plan_generation_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/plan-generation-authorizations/{authorization_id}/revoke": {
+    "permissions": [
+      "plan_generation_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/plan-secret-authorizations/{authorization_id}/approve": {
+    "permissions": [
+      "readiness_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/plan-secret-authorizations/{authorization_id}/evidence": {
+    "permissions": [
+      "readiness_manage",
+      "readiness_read"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/plan-secret-authorizations/{authorization_id}/revoke": {
+    "permissions": [
+      "readiness_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/plans/{plan_id}/approve": {
+    "permissions": [
+      "plan_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/plans/{plan_id}/manifest": {
+    "permissions": [
+      "provisioning_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/plans/{plan_id}/reject": {
+    "permissions": [
+      "plan_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/plans/{plan_id}/submit": {
+    "permissions": [
+      "plan_generate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/range-operations/{operation_id}/abandon": {
+    "permissions": [
+      "exercise_operate",
+      "provisioning_read"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/competition": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/deploy": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/destroy": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/apply-authorization": {
+    "permissions": [
+      "exercise_apply"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/destroy-authorization": {
+    "permissions": [
+      "exercise_destroy"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/destroy-execution-request": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/destroy-plan-approval": {
+    "permissions": [
+      "exercise_destroy"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/destroy-plan-generation": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/execution-request": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/plan-approval": {
+    "permissions": [
+      "exercise_apply"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/plan-generation": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/plan-review-submission": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/reconciliation-request": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/reset-authorization": {
+    "permissions": [
+      "exercise_reset"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/reset-plan-approval": {
+    "permissions": [
+      "exercise_reset"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/reset-request": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/ranges/{range_id}/proxmox/topology-compilation": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/ranges/{range_id}/reset": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/teams": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/ranges/{range_id}/teams/{team_id}/members": {
+    "permissions": [
+      "exercise_operate"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/readonly-preflight": {
+    "permissions": [
+      "staging_preflight_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/readonly-preflight/authorizations": {
+    "permissions": [
+      "onboarding_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/readonly-preflight/authorizations/{authorization_id}/approve": {
+    "permissions": [
+      "onboarding_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/readonly-preflight/authorizations/{authorization_id}/revoke": {
+    "permissions": [
+      "onboarding_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/resolver-activation/authorizations": {
+    "permissions": [
+      "resolver_activation_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/resolver-activation/authorizations/{authorization_id}/approve": {
+    "permissions": [
+      "resolver_activation_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/resolver-activation/authorizations/{authorization_id}/evidence": {
+    "permissions": [
+      "resolver_activation_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/resolver-activation/authorizations/{authorization_id}/revoke": {
+    "permissions": [
+      "resolver_activation_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-deployments": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-deployments/{deployment_id}/approve": {
+    "permissions": [
+      "staging_lab_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-deployments/{deployment_id}/deploy": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-deployments/{deployment_id}/plan": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-deployments/{deployment_id}/reject": {
+    "permissions": [
+      "staging_lab_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-deployments/{deployment_id}/submit": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-deployments/{deployment_id}/teardown": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-labs": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-labs/{lab_id}/approve": {
+    "permissions": [
+      "staging_lab_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-labs/{lab_id}/plan": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-labs/{lab_id}/reject": {
+    "permissions": [
+      "staging_lab_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-labs/{lab_id}/simulate": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-labs/{lab_id}/submit": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/staging-labs/{lab_id}/teardown": {
+    "permissions": [
+      "staging_lab_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery": {
+    "permissions": [
+      "target_discovery_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery/read-only-bootstrap/sessions": {
+    "permissions": [
+      "target_discovery_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery/read-only-bootstrap/sessions/{session_id}/bind": {
+    "permissions": [
+      "onboarding_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery/read-only-bootstrap/sessions/{session_id}/complete": {
+    "permissions": [
+      "target_discovery_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery/read-only-bootstrap/targets/{execution_target_id}/substrate-eligibility": {
+    "permissions": [
+      "staging_substrate_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery/read-only-bootstrap/worker-nodes": {
+    "permissions": [
+      "target_discovery_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery/read-only-bootstrap/worker-nodes/{node_id}/identity-approval-link": {
+    "permissions": [
+      "target_discovery_manage",
+      "worker_identity_approve",
+      "worker_identity_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery/{enrollment_id}/approve": {
+    "permissions": [
+      "target_discovery_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery/{enrollment_id}/reject": {
+    "permissions": [
+      "target_discovery_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/target-discovery/{enrollment_id}/rerun": {
+    "permissions": [
+      "target_discovery_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/targets": {
+    "permissions": [
+      "target_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/targets/{target_id}/disable": {
+    "permissions": [
+      "target_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/targets/{target_id}/discover": {
+    "permissions": [
+      "inventory_discover"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/targets/{target_id}/onboarding": {
+    "permissions": [
+      "onboarding_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/targets/{target_id}/rotate-credential": {
+    "permissions": [
+      "credential_binding_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/targets/{target_id}/rotate-operation-credential": {
+    "permissions": [
+      "credential_binding_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/targets/{target_id}/toolchain-profiles": {
+    "permissions": [
+      "toolchain_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/templates": {
+    "permissions": [
+      "template_author"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/templates/{template_id}/versions": {
+    "permissions": [
+      "version_create"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/toolchain-profiles/{profile_id}/disable": {
+    "permissions": [
+      "toolchain_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/topology-authoring/documents": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/topology-authoring/documents/{document_id}/revisions": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/topology-authoring/documents/{document_id}/revisions/{revision_id}/approve": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/topology-authoring/documents/{document_id}/revisions/{revision_id}/reject": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/topology-authoring/documents/{document_id}/revisions/{revision_id}/submit": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/topology-authoring/documents/{document_id}/revisions/{revision_id}/validate": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /api/v1/worker-identity/registrations": {
+    "permissions": [
+      "worker_identity_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/worker-identity/registrations/{registration_id}/approve": {
+    "permissions": [
+      "worker_identity_approve"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/worker-identity/registrations/{registration_id}/evidence": {
+    "permissions": [
+      "worker_identity_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /api/v1/worker-identity/registrations/{registration_id}/revoke": {
+    "permissions": [
+      "worker_identity_manage"
+    ],
+    "state": "requires"
+  },
+  "POST /internal/worker-discovery-admission/assert": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /internal/worker-discovery-admission/begin": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /internal/worker-discovery-admission/complete": {
+    "permissions": [],
+    "state": "unknown"
+  },
+  "POST /internal/worker-discovery-admission/consume": {
+    "permissions": [],
+    "state": "unknown"
+  }
+}
