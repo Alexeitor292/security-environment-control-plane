@@ -60,6 +60,11 @@ VERIFIED_UNGUARDED: set[str] = {
     "GET /api/v1/targets",
     # routers/system.py:33 — reads the plugin registry's health; no service call, no `require`.
     "GET /api/v1/plugins",
+    # routers/ranges.py:126 — the handler DELETES the principal with a comment saying why:
+    # "authentication only; the shipped catalog is not tenant data". The only open route in the
+    # contract that states its own reason.
+    "GET /api/v1/range-templates",
+    "GET /api/v1/range-templates/{slug}",
 }
 
 
@@ -116,6 +121,39 @@ def test_an_unresolved_route_is_never_reported_as_open(
             assert route in VERIFIED_UNGUARDED, f"{route} claims `open` without a hand check"
         if entry["state"] == "unknown":
             assert route not in VERIFIED_UNGUARDED
+
+
+def test_the_table_covers_exactly_the_ROUTES_THE_DOCUMENT_SERVES(
+    resolved: dict[str, dict[str, object]],
+) -> None:
+    """Set equality with the exported document, in both directions.
+
+    THE CHECK THAT WAS MISSING, and it found a real defect the moment it existed. The table used to
+    be built by reading `@router.get("...")` decorators and prepending each router's own `prefix=`.
+    That produced **13 real routes with no entry and 6 entries for routes that do not exist** —
+    prefixes are also applied at `include_router(...)`, and a decorated route in a module nobody
+    includes is not a route. Neither fact is visible from the decorator.
+
+    A count would not have caught it: 243 against 250 looks like a rounding difference. Only set
+    equality shows that the two sets disagree in BOTH directions at once.
+
+    `owner-operator-api` hit the same class from the other side — walking `app.routes` yields zero
+    API paths because every router mounts as an `_IncludedRouter`. Same lesson: the document is the
+    app's own answer about what it serves, and anything else is a reconstruction.
+    """
+    import json
+
+    document = json.loads((ARTIFACT.parent / "openapi.json").read_text(encoding="utf-8"))
+    served = {
+        f"{method.upper()} {path}"
+        for path, operations in document["paths"].items()
+        for method in operations
+        if method in {"get", "post", "put", "patch", "delete"}
+    }
+    assert set(resolved) == served, (
+        f"missing from the table: {sorted(served - set(resolved))[:5]}; "
+        f"in the table but not served: {sorted(set(resolved) - served)[:5]}"
+    )
 
 
 def test_the_resolver_resolves_most_routes(resolved: dict[str, dict[str, object]]) -> None:
