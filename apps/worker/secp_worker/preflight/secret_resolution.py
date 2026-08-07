@@ -493,7 +493,16 @@ def build_discovery_resolution_request(
 class DiscoveryCredentialResolver(Protocol):
     """The worker-only seam that turns an opaque discovery reference into secret material.
 
-    Shipped production wiring supplies the guarded implementation; tests inject an explicit fake.
+    **There is no guarded implementation of this protocol in the repository.** The only
+    implementation is :class:`SealedDiscoveryCredentialResolver` below, which always fails closed;
+    tests inject an explicit fake. This docstring previously claimed "shipped production wiring
+    supplies the guarded implementation", which was not true when written and would have let a
+    reader conclude the credential path was complete.
+
+    Supplying a real backend is an operator decision that follows Authorization Packet 1, and the
+    canonical backend to extend when it arrives is
+    :mod:`secp_worker.plan_gen.openbao_plan_resolver` — not a fourth resolver family.
+
     The signature mirrors :class:`WorkerSecretResolver` deliberately — request plus an
     independently derived expectation, and a resolver that cannot match them refuses.
     """
