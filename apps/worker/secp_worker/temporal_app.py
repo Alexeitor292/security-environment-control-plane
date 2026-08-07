@@ -41,6 +41,7 @@ from secp_worker.temporal_activity_names import (  # noqa: E402 - after the temp
     ELIGIBILITY_PREFLIGHT_ACTIVITY_NAME,
     ENROLLMENT_RECOVERY_SWEEP_ACTIVITY_NAME,
     PLAN_SECRET_READINESS_ACTIVITY_NAME,
+    PROXMOX_DISCOVERY_ACTIVITY_NAME,
     RANGE_OPERATION_ACTIVITY_NAME,
     REAL_PLAN_GENERATION_ACTIVITY_NAME,
     REMOTE_STATE_READINESS_ACTIVITY_NAME,
@@ -141,6 +142,37 @@ async def discover_activity(arg: dict) -> str:
                 run.status = WorkflowStatus.completed
                 run.finished_at = datetime.now(UTC)
         return str(snapshot_id)
+
+
+@activity.defn(name=PROXMOX_DISCOVERY_ACTIVITY_NAME)
+async def proxmox_discovery_activity(arg: dict) -> str:
+    """Run one authorized HTTPS Proxmox discovery.
+
+    **The payload carries two identifiers and nothing else.** No expected key, no expected target,
+    no expected role, no expected worker, no resolved token, no signing key and no verification
+    result crosses the Temporal boundary — every one of those is loaded inside this process from
+    durable rows by ``load_discovery_authority``. A Temporal payload is persisted in workflow
+    history and visible to anything that can read it, so an authority-bearing value placed here
+    would be an authority anybody who can enqueue a task could choose.
+
+    The CA bundle path is an INSTALLATION fact read from settings, not from the payload, for the
+    same reason: a caller-supplied CA path is a caller-supplied trust root.
+    """
+    from secp_api.config import get_settings
+    from secp_api.db import session_scope
+
+    from secp_worker.proxmox_discovery_runtime import run_authorized_discovery
+
+    with session_scope() as session:
+        outcome = run_authorized_discovery(
+            session,
+            admission_id=uuid.UUID(arg["admission_id"]),
+            organization_id=uuid.UUID(arg["organization_id"]),
+            ca_path=str(getattr(get_settings(), "proxmox_discovery_ca_bundle_path", "") or ""),
+        )
+        # The failure REASON is a closed code from the composition; it never carries a host, a path
+        # or a credential, so returning it is safe and an operator needs it.
+        return outcome.failure_reason if outcome.failed else str(outcome.admission_id)
 
 
 def _cancelled() -> bool:

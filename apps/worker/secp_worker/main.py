@@ -32,6 +32,7 @@ from secp_worker.temporal_app import (
     eligibility_preflight_activity,
     enrollment_recovery_sweep_activity,
     plan_secret_readiness_activity,
+    proxmox_discovery_activity,
     range_operation_activity,
     real_plan_generation_activity,
     remote_state_readiness_activity,
@@ -91,6 +92,13 @@ SHIPPED_ACTIVITIES: tuple = (
     reset_activity,
     destroy_activity,
     discover_activity,
+    # The HTTPS Proxmox discovery run. Registered here, on the ORDINARY queue, because it is
+    # read-only: it can execute nothing but the twenty-four reviewed typed GET operations, and the
+    # transport refuses anything the operation grammar does not describe. It is nonetheless
+    # fail-closed in the shipped worker — the discovery credential resolver default is
+    # ``SealedDiscoveryCredentialResolver``, so a run reaches the credential step and refuses
+    # before a socket is opened.
+    proxmox_discovery_activity,
     # The plan/readiness activities are the SHIPPED, always-SEALED default instances (each
     # constructed
     # with its sealed composition provider in ``temporal_app``), so the shipped worker refuses at

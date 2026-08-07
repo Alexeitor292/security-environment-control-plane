@@ -26,6 +26,10 @@ ENGINE_MODULES: tuple[str, ...] = (
     "proxmox_discovery_operations.py",
     "proxmox_discovery_plan.py",
     "proxmox_discovery_projection.py",
+    # The production entry point. It composes the engine and must be scanned exactly like the parts
+    # it composes — an entry point that could reach a mutation-capable module would make every
+    # guarantee below irrelevant, since it is the one module a runtime actually calls.
+    "proxmox_discovery_runtime.py",
     "proxmox_discovery_transport.py",
     "proxmox_sdn_operations.py",
 )

@@ -35,3 +35,10 @@ DEPLOY_ACTIVITY_NAME = "deploy_activity"
 RESET_ACTIVITY_NAME = "reset_activity"
 DESTROY_ACTIVITY_NAME = "destroy_activity"
 DISCOVER_ACTIVITY_NAME = "discover_activity"
+
+# The HTTPS Proxmox discovery run, driven by a durable authorized admission. DISTINCT from
+# ``discover_activity`` deliberately: that one is the legacy plugin path, which resolves an
+# environment-variable credential and reaches a provider plugin ungated. Reusing its name would have
+# silently replaced a registered activity, and giving the new path its own name means both are
+# visible in the registry while the legacy one is retired.
+PROXMOX_DISCOVERY_ACTIVITY_NAME = "proxmox_discovery_activity"
