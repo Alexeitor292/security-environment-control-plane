@@ -56,7 +56,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from secp_api import audit
-from secp_api.enums import AuditAction, Permission
+from secp_api.enums import AuditAction, AuditOutcome, Permission
 from secp_api.models import Organization, Role, User, UserRoleAssignment
 
 #: Recorded in the audit event so an operator can tell which bootstrap contract produced a row.
@@ -206,7 +206,7 @@ def bootstrap_initial_administrator(
         resource_id=user.id,
         actor=str(actor),
         organization_id=organization.id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={
             "contract": IDENTITY_BOOTSTRAP_VERSION,
             "reason": "initial_administrator_bootstrap",
