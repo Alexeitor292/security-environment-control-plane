@@ -11,6 +11,24 @@ The profile REJECTS: floating/``latest``/wildcard/empty/unpinned versions; missi
 integrity or bundle/lockfile hashes; local-only OpenTofu state; direct-internet provider
 download; unknown adapter types; and permissive / unconfigured production-style profiles
 (only ``isolated_lab`` is eligible in B1).
+
+WHY THE PROVIDER IS PINNED HERE AND NOT ONLY IN THE BUNDLE
+-----------------------------------------------------------
+``provider_source`` / ``provider_version`` / ``provider_checksum`` are required. They used to be
+absent, on the reasoning that the reviewed module bundle declares its own provider and the profile
+pins the bundle. That reasoning has one hole: ``module_bundle_hash`` covers the *rendered HCL*, and
+HCL naming a provider is a request, not an identity. What actually installs is whatever the offline
+mirror holds under that address, and ``provider_mirror.identity`` is a hash of the whole mirror
+tree — it says the mirror is the reviewed mirror, never which provider inside it this operation
+resolves. Between "the bundle asked for bpg/proxmox 0.66.1" and "a provider binary ran against the
+cluster" sat three unpinned facts.
+
+So the three pins are separate fields with separate refusals, because an operator resolves each
+differently: a wrong source is a re-review of the bundle, a wrong version is a re-pin, a wrong
+checksum is a compromised or rebuilt mirror artifact.
+:func:`secp_api.provisioning_execution_authority.authorize_provisioning_execution` compares all
+three against what the worker measured, and the worker measures them by *parsing the lockfile it
+will actually init from* rather than by echoing the profile back.
 """
 
 from __future__ import annotations
@@ -28,6 +46,27 @@ _FLOATING_TOKENS = {"latest", "*", "", "x", "x.x.x", "any", "stable", "edge", "m
 _RANGE_CHARS = set("><=~^ ")
 # A well-formed content digest: <alg>:<hex>. Fixtures use fake but well-formed values.
 _DIGEST_RE = re.compile(r"^[a-z0-9]+:[0-9a-fA-F]{32,128}$")
+# A FULLY-QUALIFIED provider source address: exactly HOST/NAMESPACE/TYPE, as written in an OpenTofu
+# dependency lockfile (``registry.opentofu.org/bpg/proxmox``).
+#
+# The registry-less short form HCL uses (``bpg/proxmox``) is deliberately REFUSED. OpenTofu expands
+# it to the fully-qualified address before recording it, so a profile pinning the short form could
+# only be compared to a lockfile by a suffix rule — and a suffix rule is a place to be wrong, in the
+# specific way that ``evilbpg/proxmox`` ends with ``bpg/proxmox``. Requiring the same form the
+# lockfile writes makes every comparison in the chain byte equality, with no matching rule anywhere.
+_PROVIDER_SOURCE_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9.-]*/[A-Za-z0-9][A-Za-z0-9_-]*/[A-Za-z0-9][A-Za-z0-9_-]*$"
+)
+# The ``h1:`` dirhash an OpenTofu dependency lockfile records — the identity of the EXTRACTED
+# provider package, and the hash a filesystem-mirror install actually verifies.
+#
+# Only ``h1:`` is accepted, and the reason is that it is SINGULAR. A lockfile records one ``h1:``
+# per provider block and many ``zh:`` release-zip hashes, one per platform. A pin allowed to name a
+# ``zh:`` could only be checked by asking whether it appears among many — and a membership test
+# against a list the pin also came from is not a measurement, it is the pin restating itself. With
+# ``h1:`` the worker can read one value off the lockfile without consulting the profile at all,
+# which is what makes the authority's comparison of the two a real comparison.
+_PROVIDER_CHECKSUM_RE = re.compile(r"^h1:[A-Za-z0-9+/]{43}=$")
 
 _KNOWN_RUNNER_KINDS = {"opentofu"}
 # Adapter identifiers understood by the worker rendering seam. Provider-specific
@@ -54,6 +93,29 @@ def _require_digest(value: str, field: str) -> str:
             f"{field} must be a well-formed content digest '<alg>:<hex>' "
             f"(e.g. 'sha256:<64 hex>'); missing/invalid integrity is refused"
         )
+    return value
+
+
+def _require_exact_version(value: str, field: str) -> str:
+    """An EXACT MAJOR.MINOR.PATCH pin. Ranges, wildcards and floating tokens are refused.
+
+    Shared by the OpenTofu version and the provider version rather than duplicated per field: two
+    copies of a pin rule are two rules, and the repository has already been bitten by a constraint
+    enforced in one place and forgotten in the other.
+    """
+    token = (value or "").strip().lower() if isinstance(value, str) else ""
+    if not isinstance(value, str) or token in _FLOATING_TOKENS:
+        raise ValueError(
+            f"{field} '{value}' is floating/unpinned; an EXACT version "
+            "(MAJOR.MINOR.PATCH) is required"
+        )
+    if any(ch in _RANGE_CHARS for ch in value):
+        raise ValueError(
+            f"{field} '{value}' looks like a range/constraint; an EXACT pinned version "
+            "is required (no >=, ~>, ^, spaces, etc.)"
+        )
+    if not _EXACT_VERSION_RE.match(value):
+        raise ValueError(f"{field} '{value}' must be an exact MAJOR.MINOR.PATCH version")
     return value
 
 
@@ -114,6 +176,9 @@ class ToolchainProfileSpec(_Strict):
     adapter_kind: str
     module_bundle_id: str = Field(min_length=1)
     module_bundle_hash: str
+    provider_source: str
+    provider_version: str
+    provider_checksum: str
     provider_lockfile_hash: str
     renderer_version: str = Field(min_length=1)
     state_backend: StateBackend
@@ -141,19 +206,35 @@ class ToolchainProfileSpec(_Strict):
     @field_validator("opentofu_version")
     @classmethod
     def _exact_version(cls, v: str) -> str:
-        token = (v or "").strip().lower()
-        if token in _FLOATING_TOKENS:
+        return _require_exact_version(v, "opentofu_version")
+
+    @field_validator("provider_version")
+    @classmethod
+    def _exact_provider_version(cls, v: str) -> str:
+        return _require_exact_version(v, "provider_version")
+
+    @field_validator("provider_source")
+    @classmethod
+    def _pinned_provider_source(cls, v: str) -> str:
+        if not isinstance(v, str) or not _PROVIDER_SOURCE_RE.match(v):
             raise ValueError(
-                f"opentofu_version '{v}' is floating/unpinned; an EXACT version "
-                "(MAJOR.MINOR.PATCH) is required"
+                f"provider_source '{v}' must be a FULLY-QUALIFIED provider address "
+                "'HOST/NAMESPACE/TYPE' (e.g. 'registry.opentofu.org/bpg/proxmox') — the exact form "
+                "an OpenTofu lockfile records. The registry-less short form used in HCL is refused "
+                "because comparing it to a lockfile would need a suffix rule"
             )
-        if any(ch in _RANGE_CHARS for ch in v):
+        if ".." in v:
+            raise ValueError("provider_source must not contain path traversal")
+        return v
+
+    @field_validator("provider_checksum")
+    @classmethod
+    def _pinned_provider_checksum(cls, v: str) -> str:
+        if not isinstance(v, str) or not _PROVIDER_CHECKSUM_RE.match(v):
             raise ValueError(
-                f"opentofu_version '{v}' looks like a range/constraint; an EXACT "
-                "pinned version is required (no >=, ~>, ^, spaces, etc.)"
+                f"provider_checksum '{v}' must be the lockfile 'h1:' dirhash "
+                "('h1:<43 base64 chars>='); an unpinned provider artifact is refused"
             )
-        if not _EXACT_VERSION_RE.match(v):
-            raise ValueError(f"opentofu_version '{v}' must be an exact MAJOR.MINOR.PATCH version")
         return v
 
     @field_validator("binary_integrity")

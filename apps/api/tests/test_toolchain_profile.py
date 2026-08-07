@@ -22,6 +22,9 @@ VALID: dict = {
     "adapter_kind": "proxmox",
     "module_bundle_id": "secp-fake-lab-bundle",
     "module_bundle_hash": "sha256:" + "ab" * 32,
+    "provider_source": "registry.fake/secpfake/labproxmox",
+    "provider_version": "0.9.9-fake",
+    "provider_checksum": "h1:" + "A" * 43 + "=",
     "provider_lockfile_hash": "sha256:" + "cd" * 32,
     "renderer_version": "secp-002b-1a/renderer/v1",
     "state_backend": {"kind": "http", "reference": "secp-fake-remote-state/lab"},
@@ -85,6 +88,77 @@ def test_floating_or_unpinned_version_rejected(profile):
 def test_missing_or_malformed_hashes_rejected(profile):
     with pytest.raises(ValidationFailedError):
         validate_toolchain_profile(profile)
+
+
+@pytest.mark.parametrize(
+    "profile",
+    [
+        # absent entirely — the state the profile shape was in before M1
+        _without("provider_source"),
+        _without("provider_version"),
+        _without("provider_checksum"),
+        # a source that is not a provider address, or is one with something dangerous in it
+        _with(provider_source=""),
+        _with(provider_source="proxmox"),
+        # The registry-less short form HCL uses. Refused so every comparison downstream can be
+        # byte equality against the lockfile's fully-qualified address.
+        _with(provider_source="bpg/proxmox"),
+        _with(provider_source="registry.opentofu.org/bpg/proxmox/extra"),
+        _with(provider_source="registry.opentofu.org/bpg/../../etc/passwd"),
+        _with(provider_source="registry.opentofu.org/bpg/proxmox; rm -rf /"),
+        _with(provider_source="registry.opentofu.org/bpg/prox mox"),
+        # a version that does not pin
+        _with(provider_version="latest"),
+        _with(provider_version=">=0.66.0"),
+        _with(provider_version="0.66"),
+        _with(provider_version=""),
+        # a checksum in no form an OpenTofu lockfile records
+        _with(provider_checksum=""),
+        _with(provider_checksum="deadbeef"),
+        _with(provider_checksum="sha256:" + "ef" * 32),
+        _with(provider_checksum="h1:tooshort="),
+        _with(provider_checksum="h1:" + "A" * 43),  # no trailing base64 pad
+        # A zip hash rather than the dirhash. A lockfile records many of these, so pinning one
+        # could only be checked by membership — which is the pin restating itself.
+        _with(provider_checksum="zh:" + "ef" * 32),
+    ],
+)
+def test_an_unpinned_or_unsafe_provider_is_rejected(profile):
+    """The provider is what actually runs against the cluster.
+
+    ``module_bundle_hash`` covers the HCL that *names* a provider and ``provider_mirror.identity``
+    covers the tree it is *installed from*; neither says which provider this operation resolves. A
+    profile that leaves any of the three pins out, or writes one in a form that cannot be compared
+    against a real lockfile, is refused rather than treated as unconstrained.
+    """
+    with pytest.raises(ValidationFailedError):
+        validate_toolchain_profile(profile)
+
+
+def test_the_real_reviewed_provider_address_validates():
+    """The address the shipped Proxmox bundle is pinned to must itself be a legal pin.
+
+    Asserted against the bundle's own constant rather than a literal repeated here, so a re-pin of
+    the reviewed provider cannot leave this test agreeing with a value nothing uses.
+    """
+    from secp_worker.provisioning.adapters.proxmox_bundle import PROVIDER_ADDRESS, PROVIDER_VERSION
+
+    spec = validate_toolchain_profile(
+        _with(provider_source=PROVIDER_ADDRESS, provider_version=PROVIDER_VERSION)
+    )
+    assert spec.provider_source == PROVIDER_ADDRESS
+    assert spec.provider_version == PROVIDER_VERSION
+
+
+def test_the_provider_pins_are_inside_the_profile_hash():
+    """Otherwise an approval could be re-satisfied by a profile pinning a different provider."""
+    baseline = toolchain_profile_hash(VALID)
+    for changed in (
+        _with(provider_source="registry.fake/someone/else"),
+        _with(provider_version="0.9.8-fake"),
+        _with(provider_checksum="h1:" + "B" * 43 + "="),
+    ):
+        assert toolchain_profile_hash(changed) != baseline
 
 
 @pytest.mark.parametrize(

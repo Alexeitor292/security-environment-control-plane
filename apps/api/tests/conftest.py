@@ -350,6 +350,13 @@ VALID_TOOLCHAIN_PROFILE: dict = {
     "adapter_kind": "proxmox",
     "module_bundle_id": "secp-fake-lab-bundle",
     "module_bundle_hash": "sha256:" + "ab" * 32,
+    # A clearly-fake provider on a non-routable namespace, pinned exactly. This fixture must never
+    # name the real `bpg/proxmox`: the bundle renderer refuses a profile whose provider pins are not
+    # its own, and a fixture carrying the real pins would let a test render the real reviewed bundle
+    # against a profile nobody reviewed.
+    "provider_source": "registry.fake/secpfake/labproxmox",
+    "provider_version": "0.9.9-fake",
+    "provider_checksum": "h1:" + "A" * 43 + "=",
     "provider_lockfile_hash": "sha256:" + "cd" * 32,
     "renderer_version": "secp-002b-1a/renderer/v1",
     "state_backend": {"kind": "http", "reference": "secp-fake-remote-state/lab"},

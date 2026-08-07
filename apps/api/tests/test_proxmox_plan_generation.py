@@ -39,6 +39,7 @@ from secp_api.range_providers.proxmox_network import compile_web_breach_lab
 from secp_worker.provisioning.adapters.base import AdapterError, get_adapter
 from secp_worker.provisioning.adapters.proxmox_bundle import (
     BUNDLE_ID,
+    PROVIDER_ADDRESS,
     PROVIDER_SOURCE,
     PROVIDER_VERSION,
     RESOURCE_TYPES,
@@ -65,6 +66,12 @@ PROFILE = {
     "adapter_kind": "proxmox",
     "module_bundle_id": BUNDLE_ID,
     "module_bundle_hash": "sha256:" + "ab" * 32,
+    # Taken from the bundle's own constants: this file renders the REAL reviewed bundle, and
+    # `render_bundle` refuses a profile whose provider pins are not its own. Repeating the literals
+    # here would make a re-pin of the provider fail as a fixture mismatch rather than pass.
+    "provider_source": PROVIDER_ADDRESS,
+    "provider_version": PROVIDER_VERSION,
+    "provider_checksum": "h1:" + "A" * 43 + "=",
     "provider_lockfile_hash": "sha256:" + "cd" * 32,
     "renderer_version": "secp-002b-1a/renderer/v1",
     "state_backend": {"kind": "http", "reference": "secp-fake-remote-state/lab"},

@@ -67,6 +67,11 @@ def validate_toolchain_identifiers(profile: dict) -> None:
     """Validate every pinned identifier that could be interpolated. Raise on any problem."""
     validate_executable(profile.get("executable"))
     validate_identifier(profile.get("module_bundle_id"), "module_bundle_id")
+    # The provider source reaches a rendered ``required_providers`` block and is compared against a
+    # lockfile address, so it is validated here on the same footing as the mirror identity even
+    # though the profile schema already constrains its shape. Two independent checks on a value
+    # that crosses into an artifact is the intended posture, not redundancy.
+    validate_identifier(profile.get("provider_source"), "provider_source")
     mirror = profile.get("provider_mirror") or {}
     validate_identifier(mirror.get("identity"), "provider_mirror.identity")
     backend = profile.get("state_backend") or {}

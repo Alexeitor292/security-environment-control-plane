@@ -50,17 +50,19 @@ WORKER = "wk-exec-1"
 WORKSPACE = "sha256:" + "w" * 64
 MANIFEST_HASH = "sha256:" + "c" * 64
 
-#: The profile the shipped fixture writes, plus the provider version M1 requires. The base fixture
-#: has no ``provider_version`` — deliberately, so the "unpinned is not acceptable" test below is
-#: exercising the real shape rather than one invented for it.
-PROFILE_CONTENT = {**VALID_TOOLCHAIN_PROFILE, "provider_version": "0.9.9-fake"}
+#: The profile the shipped fixture writes. It now carries the three provider pins itself, so this
+#: file no longer patches one in: a test whose fixture differs from the shipped shape is a test of
+#: the fixture.
+PROFILE_CONTENT = dict(VALID_TOOLCHAIN_PROFILE)
 
 
 def _observed(**overrides) -> ObservedToolchain:
     base = dict(
         opentofu_version=PROFILE_CONTENT["opentofu_version"],
         opentofu_binary_digest=PROFILE_CONTENT["binary_integrity"],
+        provider_source=PROFILE_CONTENT["provider_source"],
         provider_version=PROFILE_CONTENT["provider_version"],
+        provider_checksum=PROFILE_CONTENT["provider_checksum"],
         provider_lockfile_digest=PROFILE_CONTENT["provider_lockfile_hash"],
         provider_mirror_identity=PROFILE_CONTENT["provider_mirror"]["identity"],
         rendered_workspace_hash=WORKSPACE,
@@ -441,27 +443,57 @@ def test_unverifiable_evidence_is_distinct_from_failed_evidence(session, princip
     "field,reason",
     [
         ("opentofu_binary_digest", "toolchain_binary_mismatch"),
+        ("provider_source", "toolchain_provider_source_mismatch"),
         ("provider_version", "toolchain_provider_mismatch"),
+        ("provider_checksum", "toolchain_provider_checksum_mismatch"),
         ("provider_lockfile_digest", "toolchain_lockfile_mismatch"),
         ("provider_mirror_identity", "toolchain_mirror_mismatch"),
         ("opentofu_version", "toolchain_binary_mismatch"),
     ],
 )
 def test_each_toolchain_field_refuses_separately(session, principal, field, reason):
-    """Four comparisons rather than one digest over all of them: an operator resolves each
-    differently — a reinstall, a re-pin, a regeneration, a configuration change."""
+    """Six comparisons rather than one digest over all of them: an operator resolves each
+    differently — a reinstall, a re-review of the bundle, a re-pin, a rebuilt mirror artifact, a
+    regeneration, a configuration change."""
     op, _m, _t = _scenario(session, principal)
     with pytest.raises(ExecutionAuthorityRefused, match=reason):
         _authorize(session, principal, op, observed=_observed(**{field: "something-else"}))
 
 
-def test_an_unpinned_profile_field_is_a_refusal_not_a_pass(session, principal):
+@pytest.mark.parametrize(
+    "missing,reason",
+    [
+        ("binary_integrity", "toolchain_binary_mismatch"),
+        ("provider_source", "toolchain_provider_source_mismatch"),
+        ("provider_version", "toolchain_provider_mismatch"),
+        ("provider_checksum", "toolchain_provider_checksum_mismatch"),
+        ("provider_lockfile_hash", "toolchain_lockfile_mismatch"),
+    ],
+)
+def test_an_unpinned_profile_field_is_a_refusal_not_a_pass(session, principal, missing, reason):
     """ "The profile does not say" must never read as "anything is acceptable" — that is how a pin
-    becomes decoration. The SHIPPED profile shape has no provider_version, so this is the real
-    case rather than a constructed one."""
-    op, _m, _t = _scenario(session, principal, profile_content=dict(VALID_TOOLCHAIN_PROFILE))
-    with pytest.raises(ExecutionAuthorityRefused, match="toolchain_provider_mismatch"):
+    becomes decoration.
+
+    Asserted per field rather than once, because each pin is read at its own line: a refactor that
+    dropped one comparison would leave the other four passing this test. The profile is built by
+    DELETING a key from the shipped fixture rather than by writing a bespoke dict, so the case stays
+    tied to the real shape as it evolves.
+    """
+    unpinned = {k: v for k, v in VALID_TOOLCHAIN_PROFILE.items() if k != missing}
+    op, _m, _t = _scenario(session, principal, profile_content=unpinned)
+    with pytest.raises(ExecutionAuthorityRefused, match=reason):
         _authorize(session, principal, op)
+
+
+def test_the_shipped_profile_fixture_pins_every_field_the_authority_reads(session, principal):
+    """The complement of the test above, and the reason it is not vacuous.
+
+    If the shipped fixture were missing a pin, every "wrong value" case above would still pass —
+    for the wrong reason, refusing on absence rather than on disagreement. This asserts the fixture
+    authorizes cleanly, so those refusals are genuinely about the value.
+    """
+    op, _m, _t = _scenario(session, principal)
+    assert _authorize(session, principal, op) is not None
 
 
 # --- the artifact ----------------------------------------------------------------------------
