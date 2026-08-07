@@ -1,20 +1,25 @@
 """The hardened read-only Proxmox HTTPS transport for discovery.
 
-This composes two things that already exist and re-derives neither:
+It composes what already exists and re-derives neither half:
 
 * ``secp_worker.hardened_http`` — the CA-pinned client factory, the capped body reader and the
   bounded JSON parser that five other worker transports already use;
-* ``secp_plugin_proxmox.readonly_policy`` — the closed GET allowlist, canonical-path checks,
-  no-query-parameter rule and cross-host refusal.
+* ``secp_worker.proxmox_discovery_operations`` — the typed operations, and the request grammar
+  DERIVED from them. The base-URL grammar and the redirect refusal still come from
+  ``secp_plugin_proxmox``, which owns both.
+
+**Why the allowlist is derived rather than declared here.** It used to be the plugin's
+``readonly_policy``: a hand-maintained twelve-template list plus a blanket no-query-parameter rule.
+That list drifted from the twenty-four reviewed operations, so eighteen were refused at the wire —
+including ``GET /cluster/sdn``, the SDN authority preflight, and every operation carrying
+``?pending=1``. Both lists looked right in review; the defect was that there were two. The grammar
+is now computed from the operation types, so a reviewed operation and an authorised request are the
+same fact rather than two facts that must be kept in step.
 
 **Why it lives on the worker side and not in the plugin.** The plugin imports nothing from
 ``secp_worker``; ``secp_worker`` imports the plugin in four places. The dependency is one-way, and
 having the plugin reach back for ``hardened_http`` would invert it and create a package cycle. The
-plugin keeps the *policy*, which is pure; the worker owns the *client*, which does I/O — which is
-also where every other hardened transport lives.
-
-It implements the same ``ReadOnlyHttpTransport`` shape ``LiveReadOnlyProxmoxCollector`` already
-consumes, so nothing downstream changes.
+worker owns the *client*, which does I/O — which is also where every other hardened transport lives.
 
 What this fixes in the existing ``HttpxReadOnlyTransport``, each of which is a real exposure rather
 than a tidy-up:
@@ -40,7 +45,9 @@ A non-GET was representable on the call surface
 
 from __future__ import annotations
 
+import re
 from typing import Any, NoReturn, SupportsIndex
+from urllib.parse import urlencode
 
 from secp_worker.hardened_http import (
     MAX_RESPONSE_BYTES,
@@ -115,26 +122,64 @@ class HardenedProxmoxDiscoveryTransport:
 
     # --- the only operation ----------------------------------------------------------------------
 
-    def get(self, path: str, params: dict | None = None) -> Any:
-        """Issue one allowlisted GET and return the unwrapped ``data`` payload.
+    def _assert_grammatical(self, operation: object) -> tuple[str, tuple[tuple[str, str], ...]]:
+        """Refuse anything the typed operation grammar does not describe, exactly.
 
-        There is no ``method`` parameter. A non-GET is not expressible on this surface at all,
-        rather than expressible and refused — which is the difference between a type that cannot
-        represent a mutation and a check somebody can later move.
+        Four separate checks, because each closes a different way a request could differ from the
+        one that was reviewed: the operation TYPE must be one of the closed set; the rendered path
+        must match its own declared template segment for segment; every interpolated segment must
+        satisfy the identifier grammar; and the query must be byte-identical to the pairs its type
+        declares — not a subset, not a superset, not merely "no parameters".
         """
-        from secp_plugin_proxmox.readonly_policy import (
-            RedirectRefused,
-            assert_no_params,
-            assert_request_allowed,
+        from secp_worker.proxmox_discovery_operations import (
+            discovery_operation_types,
+            discovery_request_grammar,
         )
 
-        # The policy still runs, as defence in depth: the closed allowlist, canonical-path and
-        # cross-host rules live in ONE place and this transport is not exempt from them.
-        assert_request_allowed("GET", path)
-        assert_no_params(params)
+        if type(operation) not in discovery_operation_types():
+            raise ProxmoxDiscoveryTransportError("proxmox_discovery_operation_not_reviewed")
+
+        grammar = discovery_request_grammar()
+        code = getattr(operation, "operation_code", "")
+        if code not in grammar:
+            raise ProxmoxDiscoveryTransportError("proxmox_discovery_operation_not_reviewed")
+
+        template, declared_query = grammar[code]
+        path = operation.rendered_path()  # type: ignore[attr-defined]
+        if not _path_matches_template(path, template):
+            raise ProxmoxDiscoveryTransportError("proxmox_discovery_path_outside_its_template")
+
+        query = tuple(operation.query_parameters())  # type: ignore[attr-defined]
+        if query != declared_query:
+            raise ProxmoxDiscoveryTransportError("proxmox_discovery_query_outside_the_grammar")
+
+        return path, query
+
+    def execute(self, operation: object) -> Any:
+        """Issue ONE typed operation and return the unwrapped ``data`` payload.
+
+        The parameter is an OPERATION, not a path. There is no ``get(path)`` on this surface, no
+        method parameter, no raw query string and no caller-supplied mapping: a request that is not
+        one of the reviewed typed reads is not expressible here, rather than expressible and
+        checked. The path and the query are rendered by the operation from its own template, and
+        both are then verified against :func:`discovery_request_grammar`, which is DERIVED from the
+        operation types rather than maintained beside them.
+
+        That derivation is the fix for a specific defect. The transport previously enforced a
+        hand-maintained twelve-template allowlist that had drifted from the twenty-four reviewed
+        operations: eighteen were refused, including ``GET /cluster/sdn`` — the SDN authority
+        preflight every SDN honesty claim in this system rests on — and every operation carrying a
+        query parameter, because the old policy refused parameters universally. Two lists, one of
+        them wrong, and nothing compared them.
+        """
+        from secp_plugin_proxmox.readonly_policy import RedirectRefused
+
+        path, query = self._assert_grammatical(operation)
 
         ssl_context = build_ssl_context(self.__ca_path)
         url = f"{self.__base_url}/{path.lstrip('/')}"
+        if query:
+            url = f"{url}?{urlencode(query)}"
         headers = {
             "Authorization": f"PVEAPIToken={self.__token}",
             # Asked for explicitly so a non-JSON body is a server contract violation rather than
@@ -178,6 +223,30 @@ class HardenedProxmoxDiscoveryTransport:
         # A Proxmox success is always a `{"data": ...}` object. Anything else is not a response
         # this transport understands, and guessing at it is how a malformed body becomes a fact.
         raise ProxmoxDiscoveryTransportError("proxmox_discovery_response_not_an_object")
+
+
+class HardenedDiscoveryTransportFactory:
+    """The production ``TransportFactory``. Builds the hardened transport and nothing else.
+
+    This exists because the hardened class was reached by no production code path: every caller was
+    a test fake, so the composition's transport seam had a protocol, a bounded fake and no
+    implementation behind it. That is the "correct code reached by nothing" shape — the class would
+    have passed every test it has while a real run had no way to get one.
+
+    It takes no arguments of its own. Base URL, CA path and token all arrive at ``build`` from the
+    composition, which resolves the token, uses it and drops it inside one function body; a factory
+    holding any of them would extend the credential's lifetime past that.
+
+    Building contacts nothing: construction validates the base URL, refuses an unpinned CA and an
+    absent token, and opens no socket. The CA file is read at request time.
+    """
+
+    __slots__ = ()
+
+    def build(
+        self, *, base_url: str, ca_path: str, token: str
+    ) -> HardenedProxmoxDiscoveryTransport:
+        return HardenedProxmoxDiscoveryTransport(base_url=base_url, ca_path=ca_path, token=token)
 
 
 #: Closed reason codes this transport may raise. Nothing outside this set reaches an observation,
@@ -240,3 +309,24 @@ def _status_reason(status: int) -> str:
     if status == 501:
         return "proxmox_discovery_endpoint_unsupported"
     return "proxmox_discovery_request_refused"
+
+
+#: A rendered dynamic segment must still satisfy the operation grammar. Checked HERE as well as at
+#: construction, because the transport is the last thing before the wire and a segment that reached
+#: it by some other route must not be sent on the strength of having been checked earlier.
+_TRANSPORT_SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$")
+
+
+def _path_matches_template(path: str, template: str) -> bool:
+    """Whether a rendered path is exactly its template with safe segments interpolated."""
+    rendered = [p for p in path.split("/") if p != ""]
+    expected = [p for p in template.split("/") if p != ""]
+    if len(rendered) != len(expected):
+        return False
+    for actual, declared in zip(rendered, expected, strict=True):
+        if declared.startswith("{") and declared.endswith("}"):
+            if not _TRANSPORT_SAFE_SEGMENT.match(actual):
+                return False
+        elif actual != declared:
+            return False
+    return True

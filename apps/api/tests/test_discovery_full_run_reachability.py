@@ -143,7 +143,9 @@ class _FakeTarget:
         self.denied = denied or set()
         self.calls: list[str] = []
 
-    def get(self, path: str, params: dict | None = None):
+    def execute(self, operation):
+        """Takes an OPERATION, like the production transport."""
+        path = operation.rendered_path()
         self.calls.append(path)
         if path in self.denied:
             raise RuntimeError("proxmox_discovery_permission_denied")
@@ -597,7 +599,8 @@ class _ClassifyingTarget(_FakeTarget):
         super().__init__(payloads)
         self.reasons = reasons
 
-    def get(self, path: str, params: dict | None = None):
+    def execute(self, operation):
+        path = operation.rendered_path()
         self.calls.append(path)
         if path in self.reasons:
             raise RuntimeError(self.reasons[path])

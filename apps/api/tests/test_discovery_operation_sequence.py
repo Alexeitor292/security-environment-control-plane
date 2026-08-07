@@ -50,7 +50,10 @@ class _Fake:
         self.errors = errors or {}
         self.calls: list[str] = []
 
-    def get(self, path: str, params: dict | None = None):
+    def execute(self, operation):
+        """Takes an OPERATION, like the production transport. A fake that accepted a raw path
+        would not satisfy the protocol the real one implements."""
+        path = operation.rendered_path()
         self.calls.append(path)
         if path in self.errors:
             raise self.errors[path]

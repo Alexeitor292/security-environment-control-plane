@@ -23,7 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import ClassVar
 
-from secp_worker.proxmox_discovery_operations import validated_segment
+from secp_worker.proxmox_discovery_operations import DiscoveryOperation, validated_segment
 
 #: Same identity scheme as the non-SDN operations, and deliberately the same families: these run on
 #: the same engine, so their evidence must be readable by the same reviewer without a second
@@ -298,7 +298,7 @@ class GetNodeSdnBridgesOperation:
         return ()
 
 
-SDN_OPERATIONS: tuple[type, ...] = (
+SDN_OPERATIONS: tuple[type[DiscoveryOperation], ...] = (
     GetSdnRootOperation,
     GetEffectivePermissionsOperation,
     GetSdnZonesOperation,

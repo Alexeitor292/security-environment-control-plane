@@ -47,10 +47,16 @@ class _BoundedFakeTransport:
     def __init__(self, payload=None, raises: Exception | None = None) -> None:
         self.payload = payload if payload is not None else dict(_VERSION_PAYLOAD)
         self.raises = raises
-        self.calls: list[tuple[str, dict | None]] = []
+        self.calls: list[tuple[str, tuple[tuple[str, str], ...]]] = []
 
-    def get(self, path: str, params: dict | None = None):
-        self.calls.append((path, params))
+    def execute(self, operation):
+        """Takes an OPERATION, not a path — the same seam the production transport implements.
+
+        A fake accepting ``get(path, params)`` would keep passing after the real transport stopped
+        offering that shape, which is exactly how a test suite goes on proving a seam that no longer
+        exists.
+        """
+        self.calls.append((operation.rendered_path(), operation.query_parameters()))
         if self.raises is not None:
             raise self.raises
         return self.payload
@@ -98,7 +104,7 @@ def test_the_typed_version_operation_is_the_one_that_runs():
         started_at=START,
         completed_at=END,
     )
-    assert transport.calls == [("/version", None)]
+    assert transport.calls == [("/version", ())]
     assert result.failed is False
 
 

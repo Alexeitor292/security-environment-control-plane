@@ -63,9 +63,14 @@ DISCOVERY_COMPOSITION_VERSION = "secp.proxmox-discovery-composition/v1"
 
 class DiscoveryTransport(Protocol):
     """The narrow shape this composition needs. Deliberately not the transport class itself, so a
-    bounded fake is a first-class citizen and no test needs a real socket."""
+    bounded fake is a first-class citizen and no test needs a real socket.
 
-    def get(self, path: str, params: dict | None = None) -> object: ...
+    The parameter is an OPERATION, not a path. There is no ``get(path)`` anywhere on this seam, so
+    a caller-supplied path, query string or mapping has nowhere to enter — and a fake that accepted
+    one would not satisfy the protocol the production transport implements.
+    """
+
+    def execute(self, operation: object) -> object: ...
 
 
 class TransportFactory(Protocol):
@@ -519,10 +524,8 @@ def _execute_into(
         _parser_identity(operation, "parser_implementation_id")
         _parser_identity(operation, "normalizer_implementation_id")
 
-        path = operation.rendered_path()  # type: ignore[attr-defined]
-        params = dict(operation.query_parameters()) or None  # type: ignore[attr-defined]
         try:
-            payload = transport.get(path, params)
+            payload = transport.execute(operation)
         except Exception as exc:  # noqa: BLE001 - mapped to a closed reason
             reason = _closed_reason(exc)
             first_reason = first_reason or reason

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import Any, ClassVar, Protocol
 
 #: Bound into signed evidence so a snapshot names the code that interpreted it. A parse produced by
 #: a different implementation is a different observation even from identical bytes.
@@ -443,9 +443,29 @@ class GetClusterFirewallGroupsOperation:
         return ()
 
 
+class DiscoveryOperation(Protocol):
+    """What every typed operation is, structurally.
+
+    Declared so the operation set and the grammar are type-checked rather than being tuples of bare
+    ``type``: the three attributes below are exactly what the transport reads to decide whether a
+    request is one of the reviewed ones, and a new operation missing any of them should fail at the
+    type checker rather than at the wire.
+
+    ``ClassVar`` deliberately — these are properties of the OPERATION KIND, not of an instance, so
+    they are readable from the class object without constructing anything.
+    """
+
+    operation_code: ClassVar[str]
+    path_template: ClassVar[str]
+
+    def rendered_path(self) -> str: ...
+
+    def query_parameters(self) -> tuple[tuple[str, str], ...]: ...
+
+
 #: Every operation the first-MVP production composition may execute. Orchestration picks from this
 #: set; it cannot construct a request outside it.
-FIRST_MVP_OPERATIONS: tuple[type, ...] = (
+FIRST_MVP_OPERATIONS: tuple[type[DiscoveryOperation], ...] = (
     GetVersionOperation,
     GetClusterStatusOperation,
     GetNodesOperation,
@@ -461,3 +481,54 @@ FIRST_MVP_OPERATIONS: tuple[type, ...] = (
     GetClusterFirewallOptionsOperation,
     GetClusterFirewallGroupsOperation,
 )
+
+
+# --- the request grammar --------------------------------------------------------------------------
+
+
+def discovery_operation_types() -> tuple[type[DiscoveryOperation], ...]:
+    """Every typed operation the discovery engine may execute. The closed set, in one place."""
+    from secp_worker.proxmox_sdn_operations import SDN_OPERATIONS
+
+    return (*FIRST_MVP_OPERATIONS, *SDN_OPERATIONS)
+
+
+def discovery_request_grammar() -> dict[str, tuple[str, tuple[tuple[str, str], ...]]]:
+    """``operation_code -> (path template, exact query pairs)``, DERIVED from the operation types.
+
+    This is the transport's allowlist. It is not a second list maintained beside the operations —
+    it is computed from them, so the two cannot disagree. A hand-maintained allowlist is how the
+    engine came to declare twenty-four reviewed reads while the transport authorised six of them,
+    including refusing the SDN authority preflight that every SDN honesty claim rests on.
+
+    Query parameters are part of the grammar rather than universally refused: ``?pending=1`` and
+    ``?type=vm`` are FIXED values owned by their operation type, with no caller input anywhere. A
+    blanket parameter refusal and a per-operation closed value are both safe; only the second is
+    also true of what the engine actually sends.
+    """
+    grammar: dict[str, tuple[str, tuple[tuple[str, str], ...]]] = {}
+    for operation_type in discovery_operation_types():
+        grammar[operation_type.operation_code] = (
+            operation_type.path_template,
+            _declared_query(operation_type),
+        )
+    return grammar
+
+
+def _declared_query(operation_type: type[DiscoveryOperation]) -> tuple[tuple[str, str], ...]:
+    """The query pairs a type ALWAYS sends. Read from the class, never from an instance."""
+    template = operation_type.path_template
+    placeholders = template.count("{")
+    probe: DiscoveryOperation = (
+        operation_type() if placeholders == 0 else _probe_instance(operation_type, placeholders)
+    )
+    return probe.query_parameters()
+
+
+#: A throwaway instance used only to read a class-level query declaration. Its segments are
+#: syntactically valid and provenance-marked so construction succeeds; nothing is ever sent.
+_GRAMMAR_PROBE_SOURCE = "grammar-probe"
+
+
+def _probe_instance(operation_type: Any, placeholders: int) -> DiscoveryOperation:
+    return operation_type(*(["grammarprobe"] * placeholders), _GRAMMAR_PROBE_SOURCE)

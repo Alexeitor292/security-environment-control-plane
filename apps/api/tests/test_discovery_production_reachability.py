@@ -69,7 +69,8 @@ class _SpyTransportFactory:
         requested = self.requested
 
         class _T:
-            def get(self, path, params=None):
+            def execute(self, operation):
+                path = operation.rendered_path()
                 requested.append(path)
                 if path == "/version":
                     return {"version": "9.1.1", "release": "9.1", "repoid": "abc1234567"}
