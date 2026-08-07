@@ -30,6 +30,7 @@ from secp_api import audit
 from secp_api.auth import Principal
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     Permission,
     PlanSecretAuthorizationStatus,
     PlanSecretReadinessOutcome,
@@ -602,7 +603,7 @@ def get_provisioning_readiness(
             resource_id=manifest.id,
             organization_id=manifest.organization_id,
             actor=str(actor.user_id),
-            outcome="refused",
+            outcome=AuditOutcome.refused,
             data={
                 "provisioning_manifest_id": str(manifest.id),
                 "reason_codes": list(status.reasons),

@@ -75,6 +75,11 @@ from secp_api.schemas_enrollment import (
 from secp_api.services import worker_enrollment as svc
 from secp_api.services.worker_enrollment import DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT
 from secp_api.worker_enrollment_contract import HandoffFacts, WorkerEnrollmentContractError
+from secp_api.worker_observation import (
+    SOURCE_ENROLLMENT_EXCHANGE,
+    WorkerObservation,
+    record_observation,
+)
 
 router = APIRouter(prefix="/api/v1/enrollment", tags=["enrollment"])
 
@@ -121,6 +126,55 @@ def _utc_now() -> _dt.datetime:
 def _iso(moment: _dt.datetime) -> str:
     # canonical UTC string the pure contract accepts (explicit +00:00 offset, <= 40 chars)
     return moment.astimezone(_dt.UTC).isoformat(timespec="seconds")
+
+
+def _observe(status: object) -> None:
+    """Record that this worker was heard from, just now.
+
+    Called after a SUCCESSFUL authenticated exchange, and only then: a refused or unauthenticated
+    request proves nothing about the worker, and recording one would let anybody who can reach the
+    endpoint make a worker look alive.
+
+    Deliberately NOT a new endpoint. A dedicated "I am alive" route proves only that something
+    holding the worker's credentials made a request — which is exactly what these two calls already
+    prove, with the advantage of being calls the worker makes for its own reasons. It is also
+    deliberately not a durable write: the observation lives in a process-local registry and is gone
+    after a restart, which is the honest answer for a controller that has not heard from anybody
+    yet.
+
+    Never raises. A liveness observation is diagnostic, and failing an enrollment exchange because
+    the control plane could not note the time would trade a real capability for a cosmetic one.
+    """
+
+    def _field(name: str) -> str:
+        # The exchange routes hand back a MAPPING view; other routes hand back a state object.
+        # Reading only attributes silently yielded "" for every exchange, so the observation was
+        # never recorded and nothing failed — the end-to-end producer test is what caught it.
+        if isinstance(status, dict):
+            return str(status.get(name, "") or "")
+        return str(getattr(status, name, "") or "")
+
+    try:
+        installation_id = _field("worker_installation_id")
+        if not installation_id:
+            return
+        record_observation(
+            WorkerObservation(
+                worker_installation_id=installation_id,
+                worker_key_fingerprint=_field("worker_key_fingerprint"),
+                # The exchange conveys neither. Its health evidence is `dict[str, bool]`, so there
+                # is no queue string and no role in it at all. Left empty on purpose, and reported
+                # as "not supplied by this source" rather than as an empty value — see
+                # `WorkerLivenessProjection.unreported_fields`.
+                worker_role="",
+                observed_task_queue="",
+                release_fingerprint=_field("release_fingerprint"),
+                observation_source=SOURCE_ENROLLMENT_EXCHANGE,
+                observed_at=_utc_now(),
+            )
+        )
+    except Exception:  # noqa: BLE001 - see docstring: never fail an exchange over a note
+        return
 
 
 @router.post("/invitations", response_model=EnrollmentInvitationOut, status_code=201)
@@ -276,6 +330,7 @@ def bind_worker_exchange(
         expected_revision=body.expected_revision,
         now=_iso(_utc_now()),
     )
+    _observe(outcome.status)
     return BindExchangeOut(
         signed_offer=SignedControllerOfferOut.model_validate(outcome.signed_offer),
         enrollment=EnrollmentStatusOut.model_validate(outcome.status),
@@ -303,6 +358,7 @@ def record_worker_result_exchange(
         expected_revision=body.expected_revision,
         now=_iso(_utc_now()),
     )
+    _observe(outcome.status)
     return ResultExchangeOut(enrollment=EnrollmentStatusOut.model_validate(outcome.status))
 
 

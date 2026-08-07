@@ -36,6 +36,7 @@ from secp_api import audit
 from secp_api.auth import Principal
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     Permission,
     PlanSecretAuthorizationStatus,
     PlanSecretEvidenceKind,
@@ -274,7 +275,7 @@ def _mark_expired(
             resource_id=row.id,
             organization_id=row.organization_id,
             actor=str(actor.user_id),
-            outcome="expired",
+            outcome=AuditOutcome.expired,
             data=_safe_audit(row),
         )
     return won
@@ -574,7 +575,7 @@ def revoke_plan_secret_authorization(
         resource_id=row.id,
         organization_id=row.organization_id,
         actor=str(actor.user_id),
-        outcome="revoked",
+        outcome=AuditOutcome.revoked,
         data={**_safe_audit(row), "reason_code": row.revocation_reason_code},
     )
     return row

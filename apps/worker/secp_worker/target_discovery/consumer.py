@@ -17,6 +17,7 @@ from datetime import UTC, datetime, timedelta
 from secp_api import audit
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     DiscoveryFailureCode,
     DiscoveryJobStatus,
 )
@@ -180,7 +181,7 @@ def claim_and_process_one(
             resource_id=enrollment.id,
             organization_id=enrollment.organization_id,
             actor="worker",
-            outcome="success" if outcome.ok else "failure",
+            outcome=AuditOutcome.success if outcome.ok else AuditOutcome.failed,
             data={
                 "status": enrollment.status.value,
                 "reason_code": outcome.reason_code,
