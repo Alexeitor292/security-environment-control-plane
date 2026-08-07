@@ -291,8 +291,7 @@ REFUSAL_CATALOGUE: dict[str, dict[str, str]] = {
     "plan_execution_composition_invalid": {"dimension": "E", "remediation": _D},
     # The shipped plan-execution gate is a reviewed code default; a disabled gate is not something
     # an operator can turn on.
-    "plan_gate_disabled": {"dimension": "E", "remediation": _C},
-    "composition_sealed": {"dimension": "E", "remediation": _C},
+    "plan_execution_composition_unconfigured": {"dimension": "E", "remediation": _C},
     "readiness_gate_disabled": {"dimension": "E", "remediation": _C},
     "eligibility_gate_disabled": {"dimension": "E", "remediation": _C},
     "classification_invalid": {"dimension": "E", "remediation": _D},
@@ -1091,8 +1090,12 @@ def _verify_plan_execution_semantics(pe: Any) -> str | None:
         verify_plan_execution_composition(pe)  # authoritative PURE validator
     except Exception as exc:
         return getattr(exc, "reason_code", "plan_execution_composition_invalid")
-    if pe.gate.enabled is not True:
-        return "plan_gate_disabled"
+    # The `pe.gate.enabled` check that stood here is gone with `PlanExecutionGate` (ADR-030). It
+    # was the one line in this verifier that asked for a permission rather than for a property of
+    # the installed machinery, and `verify_plan_execution_composition` above already establishes
+    # every structural binding. A complete composition is still not permission to execute: that
+    # remains the per-operation PlanOnlyCapability, which this deployment-time verifier cannot and
+    # must not stand in for.
     if pe.classification != CONTROLLED_LIVE_CLASSIFICATION:
         return "classification_invalid"
     if pe.executor_factory is not issue_plan_only_executor:

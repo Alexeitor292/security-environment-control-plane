@@ -90,14 +90,19 @@ def test_sealed_plan_provider_always_returns_the_disabled_composition():
     provider = SealedPlanExecutionCompositionProvider()
     assert provider.classification == SEALED_DEFAULT_PROVIDER
     comp = provider.get()
-    assert comp.gate.enabled is False
+    # The shipped default is unusable because it is structurally EMPTY, not because a boolean is
+    # off. `PlanExecutionGate` is retired (ADR-030): a state produced by naming no machinery cannot
+    # be flipped, whereas a flag that can be False can be True.
     assert comp.classification == ""  # the shipped default carries no classification
+    assert comp.toolchain_layout is None
+    assert comp.trusted_workspace_root is None
+    assert not hasattr(comp, "gate")
 
 
 def test_controlled_live_plan_provider_accepts_only_a_controlled_live_composition():
     from secp_worker.plan_gen.composition import (
         PlanExecutionCompositionError,
-        sealed_plan_execution_composition,
+        unconfigured_plan_execution_composition,
     )
     from secp_worker.plan_gen.composition_provider import (
         CONTROLLED_LIVE_PROVIDER,
@@ -108,9 +113,11 @@ def test_controlled_live_plan_provider_accepts_only_a_controlled_live_compositio
     assert provider.classification == CONTROLLED_LIVE_PROVIDER
     assert provider.get().classification == "controlled_live"
 
-    # A SEALED default cannot masquerade as controlled-live (verify raises composition_sealed).
-    with pytest.raises(PlanExecutionCompositionError, match="composition_sealed"):
-        ControlledLivePlanExecutionCompositionProvider(sealed_plan_execution_composition())
+    # The shipped default cannot masquerade as controlled-live. It now refuses on the first thing
+    # it is actually missing — a classification — rather than on one opaque `composition_sealed`
+    # that reported the same code whether one field was absent or fourteen.
+    with pytest.raises(PlanExecutionCompositionError, match="composition_classification_invalid"):
+        ControlledLivePlanExecutionCompositionProvider(unconfigured_plan_execution_composition())
     # A TEST-ONLY composition is refused by the controlled-live provider.
     with pytest.raises(PlanExecutionCompositionError, match="not_controlled_live"):
         ControlledLivePlanExecutionCompositionProvider(_test_only_plan_composition())
@@ -207,7 +214,7 @@ def test_operator_factory_refuses_missing_or_sealed_compositions():
     from secp_worker.operator_bootstrap import OperatorBootstrapError, build_operator_activity_set
     from secp_worker.plan_gen.composition import (
         PlanExecutionCompositionError,
-        sealed_plan_execution_composition,
+        unconfigured_plan_execution_composition,
     )
 
     with pytest.raises(OperatorBootstrapError, match="missing_plan_execution_composition"):
@@ -217,9 +224,9 @@ def test_operator_factory_refuses_missing_or_sealed_compositions():
             eligibility_composition=_controlled_live_eligibility_composition(),
         )
     # A shipped SEALED plan composition is refused (it can never be laundered through the factory).
-    with pytest.raises(PlanExecutionCompositionError, match="composition_sealed"):
+    with pytest.raises(PlanExecutionCompositionError, match="composition_classification_invalid"):
         build_operator_activity_set(
-            plan_execution_composition=sealed_plan_execution_composition(),
+            plan_execution_composition=unconfigured_plan_execution_composition(),
             readiness_composition=_controlled_live_readiness_composition(),
             eligibility_composition=_controlled_live_eligibility_composition(),
         )
@@ -341,9 +348,20 @@ def test_no_environment_or_config_value_alone_activates_the_live_provider(monkey
     # No settings/env produces anything but the disabled composition; the sealed provider is fixed.
     monkeypatch.setenv("SECP_ENABLE_PLAN_ONLY", "true")
     monkeypatch.setenv("SECP_PLAN_EXECUTION_COMPOSITION", "controlled_live")
+    from secp_worker.plan_gen.composition import (
+        PlanExecutionCompositionError,
+        verify_plan_execution_composition,
+    )
+
     for settings in (None, {"enabled": True}, object()):
-        assert build_plan_execution_composition(settings).gate.enabled is False
-    assert SealedPlanExecutionCompositionProvider().get().gate.enabled is False
+        built = build_plan_execution_composition(settings)
+        # Asserted by EXERCISING the authoritative validator rather than by reading a field. A
+        # field read only says what someone wrote down; this says the shipped value genuinely
+        # cannot be used, and keeps saying so if the default ever gains machinery.
+        with pytest.raises(PlanExecutionCompositionError):
+            verify_plan_execution_composition(built)
+    with pytest.raises(PlanExecutionCompositionError):
+        verify_plan_execution_composition(SealedPlanExecutionCompositionProvider().get())
 
 
 def test_the_shipped_module_level_activities_all_use_sealed_providers():
@@ -439,7 +457,7 @@ def test_the_api_imports_no_provider_composition_or_operator_bootstrap():
         "build_operator_activity_set",
         "OperatorActivitySet",
         "build_plan_execution_composition",
-        "sealed_plan_execution_composition",
+        "unconfigured_plan_execution_composition",
     }
     for path in api_pkg.rglob("*.py"):
         if "__pycache__" in path.parts:

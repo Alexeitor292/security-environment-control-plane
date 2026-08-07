@@ -119,7 +119,6 @@ def _build_plan_execution(  # noqa: ANN202
         CONTROLLED_LIVE_CLASSIFICATION,
         CONTROLLED_LIVE_PROVIDER_SOURCE,
         PlanExecutionComposition,
-        PlanExecutionGate,
         verify_plan_execution_composition,
     )
     from secp_worker.plan_gen.composition_provider import (
@@ -136,8 +135,10 @@ def _build_plan_execution(  # noqa: ANN202
     )
 
     seams = runtime.plan_execution_seams()  # fails closed if sealed
+    # No `gate=` — `PlanExecutionGate` is retired (ADR-030). What this builds is a complete
+    # description of the trusted machinery installed here, and nothing more: it confers no
+    # permission to execute, which remains the per-operation PlanOnlyCapability.
     composition = PlanExecutionComposition(
-        gate=PlanExecutionGate(enabled=True),
         classification=CONTROLLED_LIVE_CLASSIFICATION,
         executor_factory=issue_plan_only_executor,  # bound by identity to the sealed prod issuer
         renderer_registration=CONTROLLED_LIVE_RENDERER_VERSION,

@@ -297,7 +297,7 @@ they would be encountered along an attempted start:
 | `shipped_runtime_sealed` | the no-argument controlled-live composition build |
 | `reviewed_runtime_provider_set_empty` | any runtime-provisioning attestation validating |
 | `operator_activation_seal` | the operator worker being constructed, so nothing polls the queue |
-| `plan_execution_gate_default_disabled` | the shipped plan-execution composition, before any external contact |
+| `plan_execution_composition_unconfigured` | the shipped plan-execution composition, before any external contact |
 
 ```json
 "submission_preview": {

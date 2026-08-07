@@ -134,10 +134,14 @@ SUBMISSION_STOPS: tuple[SubmissionStop, ...] = (
         "operator_activation_sealed",
         REMEDIATION_REVIEWED_CODE,
     ),
+    # Renamed from ``plan_execution_gate_default_disabled`` / ``plan_gate_disabled``. Both named a
+    # gate that no longer exists, and an operator reading "gate disabled" would go looking for the
+    # thing to enable. What actually stops submission is that the shipped composition names none of
+    # the machinery required to run anything.
     SubmissionStop(
-        "plan_execution_gate_default_disabled",
+        "plan_execution_composition_unconfigured",
         "the shipped plan-execution composition, before any external contact",
-        "plan_gate_disabled",
+        "plan_execution_composition_unconfigured",
         REMEDIATION_REVIEWED_CODE,
     ),
 )
@@ -173,19 +177,37 @@ def _observe_operator_activation_seal() -> tuple[bool, dict]:
     return sealed, {"operator_activation_sealed": sealed}
 
 
-def _observe_plan_gate_default_disabled() -> tuple[bool, dict]:
-    # The SHIPPED default of the reviewed gate dataclass — not an instance someone handed us.
-    from secp_worker.plan_gen.composition import PlanExecutionGate
+def _observe_plan_execution_composition_unconfigured() -> tuple[bool, dict]:
+    """The SHIPPED plan-execution composition cannot run anything — derived, not declared.
 
-    enabled = bool(PlanExecutionGate().enabled)
-    return (not enabled), {"shipped_plan_execution_gate_enabled": enabled}
+    This used to read ``PlanExecutionGate().enabled`` and report the stop closed when the boolean
+    was False. ADR-030 retired that gate, and the replacement is deliberately not another flag to
+    read: the shipped composition is BUILT and handed to the authoritative validator, and the stop
+    is closed only if the validator actually refuses it.
+
+    That is a stronger observation than the old one. A boolean tells you what someone wrote down;
+    exercising the validator tells you the shipped value genuinely cannot be used — and it keeps
+    reporting the truth if a future edit makes the default complete, which reading a deleted flag
+    could not.
+    """
+    from secp_worker.plan_gen.composition import (
+        PlanExecutionCompositionError,
+        unconfigured_plan_execution_composition,
+        verify_plan_execution_composition,
+    )
+
+    try:
+        verify_plan_execution_composition(unconfigured_plan_execution_composition())
+    except PlanExecutionCompositionError as exc:
+        return True, {"shipped_plan_execution_composition_refused": exc.reason_code}
+    return False, {"shipped_plan_execution_composition_refused": ""}
 
 
 _OBSERVERS = {
     "shipped_runtime_sealed": _observe_shipped_runtime_sealed,
     "reviewed_runtime_provider_set_empty": _observe_reviewed_provider_set_empty,
     "operator_activation_seal": _observe_operator_activation_seal,
-    "plan_execution_gate_default_disabled": _observe_plan_gate_default_disabled,
+    "plan_execution_composition_unconfigured": _observe_plan_execution_composition_unconfigured,
 }
 
 

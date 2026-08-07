@@ -165,7 +165,18 @@ def test_the_stops_are_observed_from_the_reviewed_constants_not_declared():
         REVIEWED_RUNTIME_PROVIDERS,
         SealedControlledLiveRuntime,
     )
-    from secp_worker.plan_gen.composition import PlanExecutionGate
+    from secp_worker.plan_gen.composition import (
+        PlanExecutionCompositionError,
+        unconfigured_plan_execution_composition,
+        verify_plan_execution_composition,
+    )
+
+    def _shipped_composition_refuses() -> bool:
+        try:
+            verify_plan_execution_composition(unconfigured_plan_execution_composition())
+        except PlanExecutionCompositionError:
+            return True
+        return False
 
     rows = {r["id"]: r for r in observe_submission_stops()}
     assert set(rows) == {s.id for s in SUBMISSION_STOPS}
@@ -177,8 +188,10 @@ def test_the_stops_are_observed_from_the_reviewed_constants_not_declared():
     assert rows["shipped_runtime_sealed"]["closed"] is (
         not SealedControlledLiveRuntime().provisioned()
     )
-    assert rows["plan_execution_gate_default_disabled"]["closed"] is (
-        not PlanExecutionGate().enabled
+    # Re-derived by exercising the validator, not by reading a flag. The stop is closed only if
+    # the shipped composition genuinely cannot be verified.
+    assert (
+        rows["plan_execution_composition_unconfigured"]["closed"] is _shipped_composition_refuses()
     )
 
     # The observed VALUES travel with the verdict, so a reader can check it rather than take it.

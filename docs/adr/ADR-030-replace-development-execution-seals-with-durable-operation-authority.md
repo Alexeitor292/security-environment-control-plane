@@ -11,14 +11,16 @@
 
 ## Context
 
-Five development-phase seals currently make real infrastructure execution *unconstructible*
-rather than *unauthorized*:
+Five development-phase seals/gates currently make real infrastructure execution *unconstructible*
+rather than *unauthorized*. Four are module constants; the fifth, `PlanExecutionGate`, is a dataclass
+field — the distinction matters because retiring a constant is flipping a value, while retiring a
+gate means deleting a field that no configuration should have been able to set:
 
 | Seal | Site | Effect |
 | --- | --- | --- |
 | `_B1A_SUBPROCESS_SEALED` | `provisioning/process_executor.py:123` | the real subprocess executor raises rather than running |
 | `_B1A_SUBPROCESS_SEALED` | `provisioning/activation.py:31` | a **second** copy; the factory always returns the fake executor |
-| `PlanExecutionGate` | `plan_gen/composition.py:77` | the shipped composition can never be enabled |
+| `PlanExecutionGate` (a **type**, not a constant) | `plan_gen/composition.py:77` | an `enabled: bool` field on the composition; the shipped composition can never be enabled |
 | `_OPERATOR_ACTIVATION_SEALED` | `secp_operator_deployment/runner.py:29` | the operator worker cannot start |
 | `REAL_PROVISIONING_SEALED` | `secp_api/routers/providers.py:51` | the provisioning route refuses |
 
@@ -46,7 +48,10 @@ either the old state or the intended one.
 
 ### 1. One authority answer, derived from durable state
 
-Delete the five constants. Do not leave compatibility aliases: an alias is a name future code can
+Delete the five seals. Four are module constants; `PlanExecutionGate` is a dataclass, so retiring it
+means deleting the TYPE and the `PlanExecutionComposition.gate` field rather than flipping a value —
+and deliberately not replacing it with a boolean under another name.
+Do not leave compatibility aliases: an alias is a name future code can
 come to depend on, and its presence would let a later edit re-acquire a global "may execute" switch.
 
 Replace them with a single derivation answering one question —
@@ -260,7 +265,7 @@ read_seals()` read both copies into `SealState`, and its two fields
 Ed25519 attestation. Deleting or renaming them would invalidate the digest of every evidence
 document already issued, with no migration path for documents already signed and distributed.
 
-**Ruling (Juan, 2026-08-07): the constants are retired; the signed schema is not.** All four field
+**Ruling (Juan, 2026-08-07): the seals are retired; the signed schema is not.** All four field
 names, their types and the canonical field set are preserved exactly. What changes is where the two
 `b1a_` values come from and what they assert:
 
@@ -272,7 +277,7 @@ new True:  the production capability may exist, but the unauthorized path was be
 
 The transition is **monotonic**: every historical `True` remains truthful under the new reading,
 because a capability that could not exist could not be reached without authority either. That is
-precisely what allows the field set to stay fixed while the constants underneath it go, and it is
+precisely what allows the field set to stay fixed while the seals underneath it go, and it is
 why this is a reinterpretation that needs documenting rather than a migration. A future
 evidence-schema version may rename these concepts cleanly; that is explicitly not an M1 change.
 
@@ -294,7 +299,7 @@ unknown is not permission. `read_seals()` treats an import failure the same way.
 probe spawns OpenTofu, contacts a provider, opens a socket, resolves a credential or mutates durable
 state — every call is expected to refuse inside a constructor.
 
-`secp_operator_deployment.verify` no longer reads the constants either, so no second, constant-based
+`secp_operator_deployment.verify` no longer reads the seals either, so no second, constant-based
 truth survives anywhere.
 
 **These booleans are not execution authority.** They exist for bootstrap-evidence compatibility,
@@ -327,7 +332,7 @@ operation can run, and no live infrastructure has been contacted.
 ## Consequences
 
 **Positive.** Real execution becomes possible under a gate that is auditable per operation rather
-than per build. The five constants stop being a thing anyone can flip. The authority answer becomes
+than per build. The five seals stop being a thing anyone can flip. The authority answer becomes
 uniform with the discovery chain's, which already derives its transport allowlist from typed
 operations rather than a maintained list.
 

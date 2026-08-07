@@ -43,11 +43,18 @@ def test_aggregate_is_typed_and_immutable():
 
 
 def test_plan_execution_is_controlled_live_bound():
-    from secp_worker.plan_gen.composition import CONTROLLED_LIVE_CLASSIFICATION
+    from secp_worker.plan_gen.composition import (
+        CONTROLLED_LIVE_CLASSIFICATION,
+        verify_plan_execution_composition,
+    )
     from secp_worker.plan_gen.process_boundary import issue_plan_only_executor
 
     agg = _agg()
-    assert agg.plan_execution.gate.enabled is True
+    # No gate to assert: `PlanExecutionGate` is retired (ADR-030). A controlled-live composition
+    # is now purely a complete description of trusted machinery, and completeness is proven by the
+    # authoritative validator accepting it rather than by a boolean being True.
+    assert not hasattr(agg.plan_execution, "gate")
+    verify_plan_execution_composition(agg.plan_execution)
     assert agg.plan_execution.classification == CONTROLLED_LIVE_CLASSIFICATION
     assert agg.plan_execution.executor_factory is issue_plan_only_executor
 
