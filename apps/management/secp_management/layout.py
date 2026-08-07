@@ -45,6 +45,13 @@ _FORBIDDEN_ROOTS: tuple[str, ...] = (
 _CONTROLLER_UNIT_NAME = "secp-controller-stack.service"
 _OPERATOR_UNIT_NAME = "secp-operator-worker.service"
 _BROKER_UNIT_NAME = "secp-enrollment-signer-broker.service"
+
+# The declarative account provisioning the installer owns. systemd-sysusers is the native,
+# idempotent mechanism for a packaged system account: the file states the desired user and group,
+# and applying it twice is a no-op. The alternative -- shelling out to `useradd` -- would need a
+# fourth pinned executable in the root-owned production pin file, and would make account creation
+# imperative and non-idempotent for no benefit.
+_SYSUSERS_FILE_NAME = "secp-worker.conf"
 _CONTROLLER_COMPOSE_NAME = "docker-compose.yml"
 _WORKER_COMPOSE_NAME = "docker-compose.yml"
 _WORKER_DEPLOYMENT_PACKAGE_NAME = "secp-operator-deployment-package.zip"
@@ -102,6 +109,11 @@ class ManagementLocations:
     # ancestors; /etc/secp/... roots are not systemd-managed, so the reviewed system unit dir is the
     # one binding.  Only the two EXACT unit paths below are ever writable (assert_unit_writable).
     systemd_dir: str = "/etc/systemd/system"
+    # The single, fixed sysusers.d directory. Deliberately /usr/lib rather than /etc: the account
+    # is a property of the INSTALLED PACKAGE, not of local administration, and an operator who
+    # wants to override it can still do so from /etc, which sysusers gives precedence to.
+    # /usr/lib/systemd is a forbidden ancestor and this is not under it.
+    sysusers_dir: str = "/usr/lib/sysusers.d"
     bootstrap_state: str = "/var/lib/secp/bootstrap"
     commissioning_state: str = "/var/lib/secp/commissioning"  # reused from PR5C
     forbidden_roots: tuple[str, ...] = field(default=_FORBIDDEN_ROOTS)
@@ -116,6 +128,7 @@ class ManagementLocations:
             "worker_config",
             "operator_deployment_config",
             "systemd_dir",
+            "sysusers_dir",
             "bootstrap_state",
             "commissioning_state",
         ):
@@ -195,6 +208,21 @@ class ManagementLocations:
         """The fixed root-owned source file the installer writes the signer role's plaintext SCRAM
         secret to; systemd ``LoadCredential`` copies it into the broker unit's credential dir."""
         return f"{self.controller_config}/credentials/enrollment-signer-db"
+
+    def worker_sysusers_path(self) -> str:
+        """The EXACT sysusers.d file the installer owns (fixed constant, never caller-selected)."""
+        return f"{self.sysusers_dir}/{_SYSUSERS_FILE_NAME}"
+
+    def assert_sysusers_writable(self, path: str) -> None:
+        """The sysusers write authority, held to the same discipline as ``assert_unit_writable``:
+        EXACTLY one code-owned path, never a prefix, a wildcard or a caller filename.
+
+        It is a separate authority from ``assert_writable`` on purpose. ``sysusers.d`` is outside
+        every owned root, and widening the owned roots to reach it would have made a whole system
+        directory writable to satisfy one file.
+        """
+        if path != self.worker_sysusers_path():
+            raise ManagementError("layout_sysusers_path_not_fixed")
 
     def broker_unit_path(self) -> str:
         """The EXACT root-gated enrollment-signer broker unit path (fixed constant, never selected).

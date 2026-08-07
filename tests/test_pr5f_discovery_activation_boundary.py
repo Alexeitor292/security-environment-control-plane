@@ -492,6 +492,12 @@ def test_wheel_scripts_and_canonical_inventory_include_only_stable_pr5f_surfaces
         "secpctl": "secp_management.cli:main",
         "secp-admission-proxy": "secp_discovery_activation.proxy:main",
         "secp-discovery-activation": "secp_discovery_activation.cli:main",
+        # The installed worker runtime. Declared here DELIBERATELY: this guard is what makes
+        # "the wheel gained an executable" a decision rather than a diff nobody read. Before it
+        # existed, the management-plane installer rendered a unit pointing at
+        # /opt/secp/worker/bin/secp-worker and then refused `installer_worker_runtime_absent`,
+        # because nothing in the repository produced that file.
+        "secp-worker": "secp_worker.cli:main",
     }
     assert Path(ADMISSION_PROXY_EXECUTABLE).name in scripts
 
