@@ -32,7 +32,9 @@ from typing import Final, Literal, get_args
 
 #: The signed-record field type.  Declared FIRST so the constants below carry it (a Literal cannot
 #: be built from names); :func:`accepted_heads_match_literal` proves it never drifts from the tuple.
-ControllerMigrationHead = Literal["d8f1a2b3c4e5", "b6e2f4a9c1d7", "c2f8e1a4b6d9", "a1d4f7c2e9b6"]
+ControllerMigrationHead = Literal[
+    "d8f1a2b3c4e5", "b6e2f4a9c1d7", "c2f8e1a4b6d9", "a1d4f7c2e9b6", "e3b7a9c25f41"
+]
 
 #: SECP-PR5F (B8 production activation) — the legacy head, accepted only during the window.
 LEGACY_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "d8f1a2b3c4e5"
@@ -43,8 +45,12 @@ PR5H_A_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "b6e2f4a9c1d7
 #: SECP-PR5H-B1 (controller-identity history, F3) — a rolling head, accepted during the window.
 PR5H_B1_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "c2f8e1a4b6d9"
 
-#: SECP-PR5H-B2 (durable controller-identity activation receipt) — the CURRENT head.
-CURRENT_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "a1d4f7c2e9b6"
+#: SECP-PR5H-B2 (durable controller-identity activation receipt) — a rolling head, accepted
+#: during the window.
+PR5H_B2_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "a1d4f7c2e9b6"
+
+#: SECP-M1 (ADR-030 condition 2: the provisioning operation's selected worker) — the CURRENT head.
+CURRENT_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "e3b7a9c25f41"
 
 #: The BOUNDED compatibility window: the explicitly supported rolling heads, in upgrade order.
 #: Retaining older heads is TEMPORARY — removing one still requires a later explicit deprecation
@@ -53,11 +59,12 @@ ACCEPTED_CONTROLLER_MIGRATION_HEADS: Final[tuple[str, ...]] = (
     LEGACY_CONTROLLER_MIGRATION_HEAD,
     PR5H_A_CONTROLLER_MIGRATION_HEAD,
     PR5H_B1_CONTROLLER_MIGRATION_HEAD,
+    PR5H_B2_CONTROLLER_MIGRATION_HEAD,
     CURRENT_CONTROLLER_MIGRATION_HEAD,
 )
 
 #: A newly issued ControllerOffer declares ONLY the current head (never an older one).
-ISSUED_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "a1d4f7c2e9b6"
+ISSUED_CONTROLLER_MIGRATION_HEAD: Final[ControllerMigrationHead] = "e3b7a9c25f41"
 
 
 def is_accepted_controller_migration_head(value: object) -> bool:

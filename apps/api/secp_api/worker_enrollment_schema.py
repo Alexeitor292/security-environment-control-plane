@@ -25,10 +25,12 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 #: The ONLY live schema head at which PR5H enrollment operations may run (never an older head).
+#: SECP-M1 added ``e3b7a9c25f41`` (the provisioning operation's selected worker, ADR-030 condition
+#: 2) as the linear successor of ``a1d4f7c2e9b6``.
 #: PR5H-B2 added ``a1d4f7c2e9b6`` (durable controller-identity activation receipt) as the linear
 #: successor of the PR5H-B1 controller-identity history head ``c2f8e1a4b6d9`` (itself the successor
 #: of the PR5H-A foundation ``b6e2f4a9c1d7``), so the required live head advances with it.
-RUNTIME_REQUIRED_MIGRATION_HEAD: Final = "a1d4f7c2e9b6"
+RUNTIME_REQUIRED_MIGRATION_HEAD: Final = "e3b7a9c25f41"
 
 
 class EnrollmentSchemaError(RuntimeError):

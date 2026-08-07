@@ -1015,6 +1015,13 @@ def _block_immutable_mutations(session: Session, _flush_context, _instances) -> 
         # is ordinary mutable lifecycle state and is deliberately untouched here.
         if isinstance(obj, ProvisioningOperation):
             if _attr_changed(obj, "worker_installation_id"):
+                # The previous value is observable here ONLY because the column declares
+                # ``active_history=True``. Without it, assigning after a commit (instance expired)
+                # produces ``added=['wk-b'], deleted=()`` and this reads None — allowing the exact
+                # re-point the rule refuses. ``load_history()`` does not rescue it: there is no
+                # pending load to resolve. Every other guard in this module compares WHICH FIELDS
+                # changed rather than what they were, so none was exposed; this is the first that
+                # depends on the previous value, and the flag is what makes it sound.
                 previous = _previous_value(obj, "worker_installation_id")
                 if previous not in (None, ""):
                     raise ImmutableResourceError(

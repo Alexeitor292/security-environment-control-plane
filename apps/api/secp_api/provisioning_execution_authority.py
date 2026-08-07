@@ -336,21 +336,30 @@ def _assert_toolchain_matches(profile: ToolchainProfile, observed: ObservedToolc
     is a regeneration, a wrong mirror is a configuration change.
     """
     content = profile.content if isinstance(profile.content, dict) else {}
-    for key, actual, reason in (
-        ("opentofu_binary_digest", observed.opentofu_binary_digest, "toolchain_binary_mismatch"),
-        ("provider_version", observed.provider_version, "toolchain_provider_mismatch"),
+    # The KEYS are the ones the shipped ToolchainProfile actually uses (`binary_integrity`,
+    # `provider_lockfile_hash`, `provider_mirror.identity`), not names invented here. A comparison
+    # against a key the profile does not write would read every profile as unpinned.
+    #
+    # `provider_version` is deliberately included and is NOT in the shipped profile shape today —
+    # so every current profile refuses at this check. That is the correct direction: the Proxmox
+    # provider version is a required pin for M1, and an authority that skipped it because the field
+    # was missing would be treating "unpinned" as "acceptable".
+    mirror = content.get("provider_mirror")
+    mirror_identity = mirror.get("identity") if isinstance(mirror, dict) else None
+    for expected, actual, reason in (
         (
-            "provider_lockfile_digest",
+            content.get("binary_integrity"),
+            observed.opentofu_binary_digest,
+            "toolchain_binary_mismatch",
+        ),
+        (content.get("provider_version"), observed.provider_version, "toolchain_provider_mismatch"),
+        (
+            content.get("provider_lockfile_hash"),
             observed.provider_lockfile_digest,
             "toolchain_lockfile_mismatch",
         ),
-        (
-            "provider_mirror_identity",
-            observed.provider_mirror_identity,
-            "toolchain_mirror_mismatch",
-        ),
+        (mirror_identity, observed.provider_mirror_identity, "toolchain_mirror_mismatch"),
     ):
-        expected = content.get(key)
         if not isinstance(expected, str) or not expected.strip():
             # An unpinned field is a refusal, not a pass. "The profile does not say" must never
             # read as "anything is acceptable" — that is how a pin becomes decorative.

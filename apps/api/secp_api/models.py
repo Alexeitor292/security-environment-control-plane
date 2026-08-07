@@ -1982,7 +1982,16 @@ class ProvisioningOperation(Base, TimestampMixin):
     # there would be indistinguishable from the value already written. NOT derived from
     # ``WorkerDiscoveryAdmission`` either: that binds a worker selected for a READ, under its own
     # single-use nonce and expiry, and provisioning has its own authority domain.
-    worker_installation_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    #
+    # ``active_history=True`` is load-bearing, not decoration. Without it, assigning to this
+    # attribute AFTER a commit (when the instance is expired) does not load the committed value
+    # first, so the flush-time history carries ``added=['wk-b'], deleted=()`` and the write-once
+    # guard reads the previous value as None — allowing exactly the re-point it exists to refuse.
+    # ``load_history()`` does not help: there is no pending load to resolve. This flag makes the
+    # SET issue the load, so the old value is observable at flush time.
+    worker_installation_id: Mapped[str | None] = mapped_column(
+        String(120), nullable=True, active_history=True
+    )
     # Deterministic runner operation id (fake runner); no secrets.
     runner: Mapped[str] = mapped_column(String(60), default="")
     operation_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
