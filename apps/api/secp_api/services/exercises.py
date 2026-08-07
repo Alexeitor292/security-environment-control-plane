@@ -16,7 +16,7 @@ from secp_api import audit
 from secp_api.auth import Principal
 from secp_api.db import session_scope
 from secp_api.dispatch import WorkflowDispatcher, get_dispatcher
-from secp_api.enums import AuditAction, LifecycleState, Permission
+from secp_api.enums import AuditAction, AuditOutcome, LifecycleState, Permission
 from secp_api.errors import ApprovalRequiredError, NotFoundError
 from secp_api.lifecycle import transition
 from secp_api.models import EnvironmentInstance, Exercise, WorkflowRun
@@ -116,7 +116,7 @@ def _audit_refusal(
             resource_id=exercise_id,
             organization_id=organization_id,
             actor=str(actor.user_id),
-            outcome="denied",
+            outcome=AuditOutcome.denied,
             data={"reason": reason},
         )
 

@@ -36,6 +36,7 @@ from secp_api.discovery_bootstrap_contract import (
 )
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     LiveReadAuthorizationStatus,
     OnboardingStatus,
     Permission,
@@ -111,8 +112,20 @@ def _get_session(
 
 
 def _audit(
-    session: Session, row: ProxmoxReadOnlyBootstrapSession, action: AuditAction, outcome: str
+    session: Session,
+    row: ProxmoxReadOnlyBootstrapSession,
+    action: AuditAction,
+    outcome: AuditOutcome,
+    *,
+    reason_code: str | None = None,
 ) -> None:
+    """Record one bootstrap-session transition.
+
+    ``reason_code`` is separate from ``outcome`` on purpose. The refusal path used to pass its
+    reason (``worker_key_rotated``) as the outcome, so WHY it was refused overwrote THAT it was
+    refused, and the reason never reached ``data`` at all. A grep for ``outcome="`` cannot see
+    that, because the value arrives positionally through this helper.
+    """
     audit.record(
         session,
         action=action,
@@ -125,6 +138,7 @@ def _audit(
             "status": row.status.value,
             "execution_target_id": str(row.execution_target_id),
             "onboarding_id": str(row.onboarding_id),
+            **({"reason_code": reason_code} if reason_code is not None else {}),
         },
     )
 
@@ -169,7 +183,7 @@ def create_bootstrap_session(
     )
     session.add(row)
     session.flush()
-    _audit(session, row, AuditAction.readonly_bootstrap_session_created, "success")
+    _audit(session, row, AuditAction.readonly_bootstrap_session_created, AuditOutcome.success)
     return row
 
 
@@ -242,7 +256,7 @@ def complete_bootstrap_session(
     row.status = ProxmoxBootstrapStatus.completed
     row.revision = row.revision + 1
     session.flush()
-    _audit(session, row, AuditAction.readonly_bootstrap_session_completed, "success")
+    _audit(session, row, AuditAction.readonly_bootstrap_session_completed, AuditOutcome.success)
     return row
 
 
@@ -297,7 +311,13 @@ def bind_bootstrap_session(
                 )
         prior.status = ProxmoxBootstrapStatus.refused
         prior.revision = prior.revision + 1
-        _audit(session, prior, AuditAction.readonly_bootstrap_session_refused, "worker_key_rotated")
+        _audit(
+            session,
+            prior,
+            AuditAction.readonly_bootstrap_session_refused,
+            AuditOutcome.refused,
+            reason_code="worker_key_rotated",
+        )
     session.flush()
     # Create + approve the live-read authorization bound to the exact endpoint digest. This reuses
     # the SECP-002B-1B-6 authorization pipeline (substrate-eligibility gated, endpoint-bound).
@@ -314,7 +334,7 @@ def bind_bootstrap_session(
     row.status = ProxmoxBootstrapStatus.bound
     row.revision = row.revision + 1
     session.flush()
-    _audit(session, row, AuditAction.readonly_bootstrap_session_bound, "success")
+    _audit(session, row, AuditAction.readonly_bootstrap_session_bound, AuditOutcome.success)
     return row
 
 
