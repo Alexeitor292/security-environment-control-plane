@@ -5,7 +5,9 @@ anything, and that every pre-existing execution seal is untouched.
 
 No readiness module may import ``OpenTofuRunner``, a process executor, a renderer, a provider
 mutation client, or the provisioning activation module; call a subprocess, ``os.system``, or
-``os.popen``; mint a ``RealLabActivationGrant``; render a workspace; or read/mutate ``os.environ``.
+``os.popen``; mint a ``RealLabActivationGrant`` (retired by ADR-030 — the name stays on the
+forbidden lists so it cannot be reintroduced here); render a workspace; or read/mutate
+``os.environ``.
 Both B1-A subprocess seals remain exactly and effectively ``True``.
 """
 
@@ -475,16 +477,18 @@ def test_the_subprocess_executor_still_cannot_be_obtained_without_durable_author
 
 
 def test_the_process_executor_factory_still_returns_the_fake():
+    """The development factory is severed from real execution, not gated into it.
+
+    It used to accept a ``RealLabActivationGrant``; that type is retired (ADR-030) because a
+    caller-attested token is not authority. Real execution now comes from a different function
+    taking durable identifiers, which is what keeps "the simulator runs headless" from implying
+    "real execution runs headless".
+    """
     from secp_api.config import Settings
-    from secp_worker.provisioning.activation import (
-        RealLabActivationGrant,
-        build_process_executor,
-    )
+    from secp_worker.provisioning.activation import build_process_executor
     from secp_worker.provisioning.process_executor import FakeProcessExecutor
 
-    settings = Settings(app_env="test")
-    grant = RealLabActivationGrant(manifest_id="m", _nonce="n")
-    assert isinstance(build_process_executor(settings, grant=grant), FakeProcessExecutor)
+    assert isinstance(build_process_executor(Settings(app_env="test")), FakeProcessExecutor)
 
 
 def test_the_real_toolchain_verifier_remains_unwired_into_execution():

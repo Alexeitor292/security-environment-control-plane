@@ -146,7 +146,18 @@ def test_dry_run_persists_only_canonical_change_set(session, principal, lab_env)
 
 
 def test_injected_non_fake_executor_is_refused_without_process(session, principal, lab_env):
-    """An injected non-fake executor is refused before any process call (defense-in-depth)."""
+    """An injected non-fake executor is refused before any process call.
+
+    The refusal used to be "not approved for B1-A fake-only execution" — a seal that made every
+    real executor unreachable and, in doing so, made the LIVE-EVIDENCE requirement standing behind
+    it dead code marked ``pragma: no cover - unreachable``. ADR-030 retired the seal, so the
+    evidence requirement is now the operative check and this target's simulated onboarding evidence
+    is what refuses.
+
+    That is a stronger property, not a weaker one: the old refusal rejected the executor for being
+    the wrong TYPE, which a sufficiently fake-looking object would have passed. This one rejects
+    the OPERATION for not having been proven live, which no executor can talk its way around.
+    """
 
     class _Evil:  # not marked b1a_fake_only
         def __init__(self):
@@ -158,7 +169,7 @@ def test_injected_non_fake_executor_is_refused_without_process(session, principa
 
     env = lab_env()
     evil = _Evil()
-    with pytest.raises(ProvisioningRefusedError, match="not approved for B1-A"):
+    with pytest.raises(ProvisioningRefusedError, match="live_verified onboarding evidence"):
         run_real_provisioning(
             session,
             env.manifest.id,
@@ -431,3 +442,158 @@ def test_profile_bound_to_another_org_is_refused(session, principal, lab_env):
     _corrupt_profile(session, env.toolchain.id, organization_id=org.id)
     with pytest.raises(ProvisioningRefusedError, match="different organization"):
         _run(session, env.manifest, K.dry_run)
+
+
+# --- ADR-030: the production path derives the authority, and nothing else can ------------------
+
+
+def test_the_retired_grant_cannot_be_reached_from_the_execution_module():
+    """`gate_passed=True` is gone from the shipped path, as a name and as a concept.
+
+    Asserted against the module's own source rather than by calling something: the failure this
+    guards is a REINTRODUCTION, and a behavioural test only sees a reintroduction that is also
+    wired up. A name reappearing is the earlier signal.
+    """
+    import ast
+    import inspect
+
+    from secp_worker.provisioning import activation, execution
+
+    for module in (activation, execution):
+        tree = ast.parse(inspect.getsource(module))
+        names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+            n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+        }
+        kwargs = {
+            kw.arg for n in ast.walk(tree) if isinstance(n, ast.Call) for kw in n.keywords if kw.arg
+        }
+        for banned in ("grant_real_lab_activation", "RealLabActivationGrant"):
+            assert banned not in names, f"{module.__name__} references {banned}"
+        for banned in ("gate_passed", "armed", "unsealed", "real", "enabled"):
+            assert banned not in kwargs, f"{module.__name__} passes {banned}= to something"
+
+
+def test_the_production_composition_calls_the_authority_rather_than_reimplementing_it():
+    """Reachability, asserted structurally.
+
+    The repository has repeatedly found correct security derivations that nothing called. This
+    pins the edge: `authorized_executor_for_operation` must call BOTH `measure` (so the observation
+    is taken from the machine) and `authorize_provisioning_execution` (so the answer comes from
+    durable rows), and must reach the executor only through `issue_authorized_executor`.
+    """
+    import ast
+    import inspect
+
+    from secp_worker.provisioning.activation import authorized_executor_for_operation
+
+    tree = ast.parse(inspect.getsource(authorized_executor_for_operation).lstrip())
+    called = {
+        n.func.id if isinstance(n.func, ast.Name) else n.func.attr
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name | ast.Attribute)
+    }
+    assert "measure" in called
+    assert "authorize_provisioning_execution" in called
+    assert "issue_authorized_executor" in called
+    # It must NOT construct the real executor directly -- that would bypass the one door.
+    assert "SubprocessProcessExecutor" not in called
+
+
+def test_the_composition_supplies_no_expected_value_to_the_authority():
+    """A caller may pass identifiers and a measurement, never an expectation.
+
+    If a change let this function forward a change-set hash, an approval id or a toolchain field,
+    the authority would be comparing a value to one the worker chose.
+    """
+    import inspect
+
+    from secp_worker.provisioning.activation import authorized_executor_for_operation
+
+    params = set(inspect.signature(authorized_executor_for_operation).parameters)
+    assert params == {
+        "session",
+        "operation_id",
+        "organization_id",
+        "worker_installation_id",
+        "toolchain_layout",
+        "rendered_workspace_hash",
+    }
+    for banned in ("change_set_hash", "approval_id", "observed_toolchain", "authority", "profile"):
+        assert banned not in params, banned
+
+
+def test_a_real_executor_is_only_obtainable_from_a_real_authority():
+    """The one door, and it checks by TYPE.
+
+    A duck-typed object carrying the right attribute names is a forgery, and the refusal must not
+    depend on the caller having gone through `issue_authorized_executor`.
+    """
+    from secp_worker.provisioning.activation import issue_authorized_executor
+    from secp_worker.provisioning.process_executor import (
+        ProcessExecutionError,
+        SubprocessProcessExecutor,
+    )
+
+    class _Forged:
+        opentofu_executable = "/opt/secp/bin/tofu"
+        provider_mirror_identity = "forged"
+
+    for bad in (None, object(), _Forged()):
+        with pytest.raises(ProcessExecutionError):
+            issue_authorized_executor(bad)
+        with pytest.raises(ProcessExecutionError):
+            SubprocessProcessExecutor(authority=bad)
+
+
+def test_the_simulator_path_needs_no_worker_and_cannot_reach_a_process(session, principal, lab_env):
+    """The separation that keeps a headless simulator from implying headless real execution.
+
+    Called with neither `worker_installation_id` nor `toolchain_layout` — the shape a dev/test
+    caller uses — it completes against a fake that runs nothing.
+    """
+    from secp_worker.provisioning.activation import build_process_executor
+    from secp_worker.provisioning.process_executor import FakeProcessExecutor
+
+    env = lab_env()
+    op = run_real_provisioning(
+        session, env.manifest.id, K.dry_run, settings=REAL_ON, dispatch_mode="temporal"
+    )
+    assert op is not None
+    assert isinstance(build_process_executor(REAL_ON), FakeProcessExecutor)
+
+
+def test_asking_for_real_execution_with_an_unselected_worker_refuses(session, principal, lab_env):
+    """The binding the durable authority exists for.
+
+    `lab_env` builds an operation with no `worker_installation_id`, so the production branch must
+    refuse inside the authority rather than proceeding with any healthy worker in the org. The
+    refusal names the control plane, so an operator is sent to a row rather than to the worker.
+    """
+    from secp_worker.provisioning.toolchain_verify import ToolchainFilesystemLayout
+
+    env = lab_env()
+    layout = ToolchainFilesystemLayout(
+        trusted_root="/opt/secp/toolchain",
+        executable="bin/tofu",
+        version_metadata="meta/version.json",
+        module_bundle="bundle",
+        provider_lockfile="meta/provider.lock",
+        provider_mirror="mirror",
+        cli_config="meta/cli.tofurc",
+    )
+    with pytest.raises(ProvisioningRefusedError) as exc:
+        run_real_provisioning(
+            session,
+            env.manifest.id,
+            K.dry_run,
+            settings=REAL_ON,
+            dispatch_mode="temporal",
+            worker_installation_id="wk-not-selected",
+            toolchain_layout=layout,
+        )
+    # Either the toolchain could not be measured on this machine or the control plane refused.
+    # Both are correct refusals and both are DISTINCT from each other in the message, which is the
+    # property under test: an operator is never told to re-pin a profile when the mirror is absent.
+    message = str(exc.value)
+    assert ("could not be measured" in message) or ("did not authorize" in message)
+    assert not ("could not be measured" in message and "did not authorize" in message)

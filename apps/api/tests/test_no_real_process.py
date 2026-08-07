@@ -95,28 +95,38 @@ def test_the_removed_config_flag_cannot_be_resurrected_through_the_factory():
     """
     settings = Settings(app_env="dev", enable_opentofu_subprocess=True)
     assert not hasattr(settings, "enable_opentofu_subprocess")
-    assert isinstance(build_process_executor(settings, grant=None), FakeProcessExecutor)
+    assert isinstance(build_process_executor(settings), FakeProcessExecutor)
 
 
-def test_grant_requires_a_passed_gate():
-    from secp_worker.provisioning.activation import grant_real_lab_activation
+def test_the_activation_grant_is_gone_rather_than_defaulted_off():
+    """``RealLabActivationGrant`` / ``grant_real_lab_activation(gate_passed=...)`` no longer exist.
 
-    with pytest.raises(RuntimeError, match="gate"):
-        grant_real_lab_activation(manifest_id="m", gate_passed=False)
+    The grant was minted by the caller attesting its own gate had passed — ``gate_passed=True``
+    written at the one call site — which is a value that widens what may execute supplied by the
+    code being permitted. It was dormant while the subprocess seal held it shut; once ADR-030
+    retired that seal it became the most permissive input on the path.
 
-
-def test_even_a_valid_grant_cannot_obtain_a_real_executor():
-    """A caller-attested ``gate_passed=True`` is not authority and never was a substitute for it.
-
-    The grant is minted through the real function with the strongest input it accepts. Under
-    ADR-030 the factory is SEVERED from it -- the parameter is accepted for call-site compatibility
-    and cannot influence the result.
+    Asserted as ABSENCE from the module rather than as "it returns the fake". A retired capability
+    that still exists is one import away from being called again, and a test that only checks its
+    return value would keep passing if someone re-wired it.
     """
-    from secp_worker.provisioning.activation import grant_real_lab_activation
+    from secp_worker.provisioning import activation
 
-    settings = Settings(app_env="dev")
-    grant = grant_real_lab_activation(manifest_id="m", gate_passed=True)
-    assert isinstance(build_process_executor(settings, grant=grant), FakeProcessExecutor)
+    for retired in ("RealLabActivationGrant", "grant_real_lab_activation"):
+        assert not hasattr(activation, retired), retired
+
+
+def test_the_development_factory_takes_nothing_a_caller_could_attest():
+    """Structural: the only parameter is ``settings``, and it is severed from the result.
+
+    A second parameter of any kind is a place to put a permission. Asserted on the signature, so a
+    future ``grant=``/``authority=``/``allow=`` argument fails here rather than silently becoming
+    the thing that decides what executes.
+    """
+    import inspect
+
+    params = inspect.signature(build_process_executor).parameters
+    assert list(params) == ["settings"]
 
 
 def test_negative_gates_never_construct_real_subprocess():

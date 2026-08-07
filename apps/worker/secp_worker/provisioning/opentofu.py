@@ -197,18 +197,32 @@ class OpenTofuRunner:
         except RenderingError as exc:
             raise RunnerError(f"workspace rendering refused: {exc}") from exc
 
-    def prepare(self, manifest: dict, *, operation_id: str, destroy: bool) -> PreparedOpenTofuPlan:
+    def prepare(
+        self,
+        manifest: dict,
+        *,
+        operation_id: str,
+        destroy: bool,
+        workspace: RenderedWorkspace | None = None,
+    ) -> PreparedOpenTofuPlan:
         """Render, offline-init, generate ONE plan, and canonicalize it.
 
         Returns a transient prepared plan bound to the exact generated plan file, ready
         for ``apply_prepared`` / ``destroy_prepared`` without any further render or plan.
         The caller owns the lifecycle and MUST call ``cleanup`` (in a finally block).
+
+        ``workspace`` accepts an ALREADY-RENDERED workspace. The production execution path renders
+        once before it has an executor at all — the rendered digest is an input to the execution
+        authority that produces the executor — and hands the same object here. Re-rendering would
+        apply an artifact whose digest was computed by a different render; rendering is
+        deterministic, so the two would normally agree, and depending on "normally" is what this
+        parameter removes.
         """
         # These may raise before any workspace exists on disk — nothing to clean up yet.
         if not self.validate(manifest).ok:
             raise RunnerError("manifest is not runnable (redacted)")
         self._verify_toolchain()
-        workspace = self._render(manifest)
+        workspace = workspace if workspace is not None else self._render(manifest)
 
         # After materialization, prepare() OWNS the ephemeral workspace. On any failure
         # before a PreparedOpenTofuPlan is successfully returned it removes it itself; on

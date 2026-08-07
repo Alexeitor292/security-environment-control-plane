@@ -12,7 +12,8 @@ This package NEVER:
 * executes a subprocess, ``os.system``, or ``os.popen``;
 * imports ``OpenTofuRunner``, a process executor, a renderer, a provider mutation client, or the
   provisioning activation module;
-* constructs a ``RealLabActivationGrant``;
+* constructs a ``RealLabActivationGrant`` (retired by ADR-030; the guard is kept so the name
+  cannot come back here);
 * renders an OpenTofu workspace;
 * creates, reads, writes, uploads, downloads, copies, restores, migrates, deletes, or exposes an
   OpenTofu state payload;
