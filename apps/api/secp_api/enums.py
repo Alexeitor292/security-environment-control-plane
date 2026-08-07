@@ -832,6 +832,48 @@ class EligibilityReasonCategory(str, Enum):
     internal = "internal"
 
 
+class AuditOutcome(str, Enum):
+    """Closed disposition of one audited attempt — how it ended, never what it was about.
+
+    The audit ledger is append-only, so this enum binds the WRITE path only. Rows already in the
+    ledger may hold a value that is not a member here (``failure``, and eligibility verdicts that
+    a caller wrote into this column) and they stay exactly as written: an audit ledger that can be
+    edited to look consistent is worth less than one that is honestly inconsistent. Read models
+    therefore keep this column typed as a plain string on purpose — see
+    :class:`~secp_api.schemas.AuditEventOut`.
+
+    ``denied`` and ``refused`` are NOT synonyms, and the distinction is the reason this is an enum
+    rather than a comment. ``denied`` is an authorization answer: the actor may not do this.
+    ``refused`` is a precondition answer: the actor may, but the system's state does not permit it
+    right now. Collapsing them would erase the difference between "you lack permission" and "the
+    plan is stale", which are diagnosed and remediated by different people.
+
+    ``failed`` is neither: the attempt was authorized, its preconditions held, and it did not
+    complete. It is the only member that implies something may be half-done.
+
+    Note that this enum describes the AUDIT RECORD, and the word ``outcome`` names at least six
+    other unrelated closed sets in this codebase (``EligibilityOutcome``,
+    ``RemoteStateReadinessOutcome``, ``ToolchainAttestationOutcome``,
+    ``PlanSecretReadinessOutcome``, the acceptance run outcomes, and the Proxmox per-half
+    verification outcomes). None of them is interchangeable with this one, and one of them had
+    already leaked into this column.
+    """
+
+    #: The audited operation completed. This is the default, and by far the common case: most
+    #: ``audit.record`` calls sit on a success path and pass nothing.
+    success = "success"
+    #: Authorization refused it — permission, organization scope, or target scope.
+    denied = "denied"
+    #: A precondition or gate refused it. Authorization was not the obstacle.
+    refused = "refused"
+    #: It was attempted and did not complete.
+    failed = "failed"
+    #: An existing grant was withdrawn while still valid.
+    revoked = "revoked"
+    #: An existing grant lapsed by time rather than by decision.
+    expired = "expired"
+
+
 class AuditAction(str, Enum):
     organization_created = "organization.created"
     user_created = "user.created"

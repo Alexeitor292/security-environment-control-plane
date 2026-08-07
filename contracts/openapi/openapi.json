@@ -14272,6 +14272,83 @@
         ]
       }
     },
+    "/api/v1/manifests": {
+      "get": {
+        "description": "Enumerate the organization's provisioning manifests, newest first.\n\nDeclared BEFORE ``/manifests/{manifest_id}`` deliberately. FastAPI matches routes in\ndeclaration order, and a literal path that follows a parameterised sibling is still reachable\nhere only because ``manifest_id`` is typed as a UUID — a rename to ``str`` would silently\ncapture this path and return a 404 for every list request. Ordering it first removes the\ndependence on that coincidence.",
+        "operationId": "list_manifests_api_v1_manifests_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "deployment_plan_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Deployment Plan Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "execution_target_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Execution Target Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ManifestOut"
+                  },
+                  "title": "Response List Manifests Api V1 Manifests Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Manifests",
+        "tags": [
+          "provisioning"
+        ]
+      }
+    },
     "/api/v1/manifests/{manifest_id}": {
       "get": {
         "operationId": "get_manifest_api_v1_manifests__manifest_id__get",

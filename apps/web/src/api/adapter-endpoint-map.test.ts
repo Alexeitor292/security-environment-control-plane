@@ -16,11 +16,15 @@ import { describe, expect, it } from "vitest";
 import {
   ADAPTER_ENDPOINT_MAP,
   ADAPTER_METHODS,
+  READER_SURFACES,
+  UNSERVED_METHOD_PROBES,
   CREDENTIAL_INVENTORY_SEGMENTS,
   hasCredentialInventorySegment,
+  MISSING_SURFACES,
   servedMethods,
   unservedMethods,
 } from "./adapter-endpoint-map";
+import { analyseReachability, type ContractDocument } from "./reachability";
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 const CONTRACT = join(REPO_ROOT, "contracts", "openapi", "openapi.json");
@@ -35,7 +39,7 @@ describe("the map covers the adapter exactly", () => {
     // Set equality in BOTH directions. A method covered twice, or a method covered by nothing,
     // are different bugs and both are silent — the first shadows, the second reads as "no comment".
     const mapped = ADAPTER_ENDPOINT_MAP.map((m) => m.method);
-    expect([...mapped].sort()).toEqual([...ADAPTER_METHODS].sort());
+    expect([...mapped].sort()).toEqual([...ADAPTER_METHODS, ...READER_SURFACES].sort());
     expect(new Set(mapped).size, "a method is mapped twice").toBe(mapped.length);
   });
 
@@ -114,6 +118,100 @@ describe("absent means absent", () => {
     // And the splitting works: an ordinary route is not matched by accident.
     expect(hasCredentialInventorySegment("/api/v1/ranges")).toBe(false);
     expect(hasCredentialInventorySegment([".", "api", "vault"].join("/"))).toBe(true);
+  });
+});
+
+describe("parent reachability is computed, not judged", () => {
+  // THE THIRD CHECKING DIRECTION. The map verifies claimed endpoints exist; the probes verify
+  // unserved methods are still unserved. Neither can see an entry that is SERVED by a route
+  // nobody can reach — it passes both and still cannot be built.
+  //
+  // `listApprovals` is that case: GET /manifests/{manifest_id}/change-sets exists and works, and
+  // nothing enumerates manifests. Marking it `shaped` invited someone to wire it.
+  const reachability = analyseReachability(document as unknown as ContractDocument);
+
+  it("agrees with every entry's recorded status", () => {
+    for (const mapping of ADAPTER_ENDPOINT_MAP) {
+      if (mapping.endpoints.length === 0) continue;
+      const anyReachable = mapping.endpoints.some((path) => reachability.isReachable(path));
+      if (mapping.status === "parent-unreachable") {
+        expect(
+          anyReachable,
+          `${mapping.method} is recorded parent-unreachable, but ${mapping.endpoints.find((p) => reachability.isReachable(p))} is reachable`,
+        ).toBe(false);
+      } else {
+        expect(
+          anyReachable,
+          `${mapping.method} is recorded '${mapping.status}' but none of its endpoints is ` +
+            `reachable — blocked by ${mapping.endpoints.flatMap((p) => reachability.unreachableSpacesOf(p)).join(", ")}. ` +
+            "It is parent-unreachable: the route exists and nothing enumerates the id it needs.",
+        ).toBe(true);
+      }
+    }
+  });
+
+  it("no longer blocks approvals, because the one space it named was filled", () => {
+    // This named ONE missing collection route, not two — reporting two would have sent the API
+    // owner to build something already reachable (plans, via exercises). Exactly one route,
+    // `GET /api/v1/manifests`, made it reachable, so the precision was worth having.
+    //
+    // Inverted rather than deleted: what it now proves is that the approvals gap is a SHAPE
+    // problem, not a reachability one, which is a different job for a different owner.
+    const approvals = ADAPTER_ENDPOINT_MAP.find((m) => m.method === "listApprovals");
+    const blocked = (approvals?.endpoints ?? []).flatMap((p) =>
+      reachability.unreachableSpacesOf(p),
+    );
+    expect([...new Set(blocked)]).toEqual([]);
+    expect(approvals?.status).toBe("shaped");
+  });
+
+  it("keeps teardown evidence reachable, and the artifact index separate from it", () => {
+    // The two concepts that shared the name `listEvidence`. One is served and range-scoped; the
+    // other has no backend at all. Recorded apart so the inventory stops counting them as one.
+    expect(reachability.isReachable("/api/v1/ranges/{range_id}/teardown-evidence")).toBe(true);
+    const index = MISSING_SURFACES.find((s) => s.method === "listArtifactIndex");
+    expect(index?.owner).toBe("backend");
+    expect(index?.blockedOn).toBe("capability");
+  });
+});
+
+describe("absent is checked, not asserted", () => {
+  // The direction the map did NOT verify, and the reason it needed to. `listApprovals` said
+  // `absent` while `GET /manifests/{id}/change-sets` had started enumerating change-set
+  // approvals. Verifying only that claimed endpoints EXIST leaves the optimistic error
+  // unguarded: a gap that has since closed, still recorded as open, with a frontend working
+  // around it.
+  const unserved = unservedMethods().map((m) => m.method);
+
+  it("has a probe for every unserved method", () => {
+    // Set equality, so adding an `absent` method without a probe fails rather than being
+    // silently exempt from the check.
+    expect([...unserved].sort()).toEqual(Object.keys(UNSERVED_METHOD_PROBES).sort());
+  });
+
+  it.each(unserved)("%s: no registered route looks like it serves this", (method) => {
+    const probe = UNSERVED_METHOD_PROBES[method];
+    const matches = [...REGISTERED].filter(probe);
+    expect(
+      matches,
+      `${method} is recorded as unserved, but these routes now exist: ${matches.join(", ")}. ` +
+        "Re-decide the entry — either they serve it and the status changes, or they do not and " +
+        "the probe is too broad. Do not delete the assertion.",
+    ).toEqual([]);
+  });
+
+  it("uses probes that can actually match something", () => {
+    // A predicate that matched nothing would pass over any API forever. Each is exercised
+    // against a path shaped like the route it is watching for.
+    expect(UNSERVED_METHOD_PROBES.listEvents("/api/v1/competitions")).toBe(true);
+    expect(UNSERVED_METHOD_PROBES.listAlerts("/api/v1/alerts")).toBe(true);
+    expect(UNSERVED_METHOD_PROBES.listReports("/api/v1/reports")).toBe(true);
+    expect(UNSERVED_METHOD_PROBES.listUsers("/api/v1/users")).toBe(true);
+    expect(UNSERVED_METHOD_PROBES.listAccessProfiles("/api/v1/access-profiles")).toBe(true);
+    // And none of them fires on an ordinary route.
+    for (const probe of Object.values(UNSERVED_METHOD_PROBES)) {
+      expect(probe("/api/v1/ranges/{range_id}/proxmox/plan")).toBe(false);
+    }
   });
 });
 

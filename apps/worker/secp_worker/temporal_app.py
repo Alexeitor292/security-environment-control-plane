@@ -216,7 +216,7 @@ def run_eligibility_preflight_activity_body(arg: dict, *, eligibility_provider) 
 
     from secp_api import audit
     from secp_api.db import session_scope
-    from secp_api.enums import AuditAction, EligibilityOutcome
+    from secp_api.enums import AuditAction, AuditOutcome, EligibilityOutcome
     from secp_api.models import TargetOnboarding, WorkflowRun
 
     from secp_worker.onboarding.eligibility_preflight import (
@@ -250,7 +250,7 @@ def run_eligibility_preflight_activity_body(arg: dict, *, eligibility_provider) 
                 resource_id=onboarding_id,
                 organization_id=org_id,
                 actor="worker",
-                outcome="refused",
+                outcome=AuditOutcome.refused,
                 data={"reason_category": reason, "onboarding_id": str(onboarding_id)},
             )
             _finish_run(session, run_id, now)
@@ -381,6 +381,7 @@ def _run_readiness_activity_body(arg: dict, *, kind: str, readiness_provider) ->
     from secp_api.db import session_scope
     from secp_api.enums import (
         AuditAction,
+        AuditOutcome,
         PlanSecretReadinessOutcome,
         RemoteStateReadinessOutcome,
         WorkflowStatus,
@@ -426,7 +427,7 @@ def _run_readiness_activity_body(arg: dict, *, kind: str, readiness_provider) ->
                 resource_id=manifest_id,
                 organization_id=org_id,
                 actor="worker",
-                outcome="refused",
+                outcome=AuditOutcome.refused,
                 data={
                     "operation_kind": kind,
                     "provisioning_manifest_id": str(manifest_id),

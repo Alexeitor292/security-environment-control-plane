@@ -445,6 +445,36 @@ importer set (currently empty): importing it from anywhere at all, component or
 not, fails that pin and forces the exemption to be re-decided rather than
 silently becoming false.
 
+### 4.7b For P7-D: `DataTable` absorbs a collapsed state and manufactures distinctness
+
+**Standing rule for every page that renders through `DataTable`: the wiring test
+must assert the PRESENCE of the `<table>`, not merely that the six seam states
+render differently from one another.**
+
+`DataTable` has its own `rows.length === 0 → EmptyState` branch. It sits *below*
+the seam, so when a state that should never reach the table does reach it, the
+component supplies an empty rendering of its own — and that rendering is unlike
+any other state's, so a pairwise-distinctness assertion stays green.
+
+**Measured, not predicted.** During P7-D.8, `QueryStateView`'s `empty` branch was
+mutated to render through the ready path. The pairwise test passed. What appeared
+on screen was *"No audit events match — Adjust the outcome filter or search"*:
+advice about a filter nobody had applied, describing a ledger that was simply
+empty. Only an explicit `<table>` assertion caught it.
+
+> **Distinct output is necessary and not sufficient.** Two states can differ and
+> both be wrong. A component underneath the seam can manufacture a distinction
+> the seam did not provide.
+
+This generalises past `DataTable`: **any component with its own empty, loading or
+error branch will absorb a collapsed state from above and hide the collapse from
+a distinctness assertion.** `LoadingState`, `ErrorState` and `EmptyState` are all
+reachable directly by pages. Assert the thing that should be *there*.
+
+Pages affected in the remaining P7-D order: Targets, Workers, Placement,
+Inventory, Integrations, EventScoring, ScenarioLibrary, Workflows — all render
+through `DataTable` or a card grid with the same shape.
+
 ### 4.8 What the frontend suite structurally could not catch
 
 The backend guards found a real boundary violation that **1058 passing frontend

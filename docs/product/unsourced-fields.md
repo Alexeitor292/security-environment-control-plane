@@ -3,16 +3,17 @@
 <!-- GENERATED FILE - DO NOT EDIT. Source: apps/web/src/api/adapter-endpoint-map.ts
      Regenerate: cd apps/web && npm run generate:unsourced-fields -->
 
-The spatial frontend talks to the control plane through one interface of **22 methods**. Resolving each against the routes the live application actually registers gives:
+The spatial frontend talks to the control plane through one interface of **23 methods**. Resolving each against the routes the live application actually registers gives:
 
 | | methods |
 | --- | --- |
 | Served, and complete | 0 |
-| Served, with fields the platform does not produce | 15 |
+| Served, with fields the platform does not produce | 16 |
+| Served, but nothing enumerates the id it needs | 0 |
 | No endpoint at all | 6 |
 | Deliberately not served | 1 |
 
-Across them, **115 distinct product fields have no source on the wire**. They are not bugs and they are not oversights in the frontend: they are places where the designed experience describes something the platform does not measure.
+Across them, **124 distinct product fields have no source on the wire**. They are not bugs and they are not oversights in the frontend: they are places where the designed experience describes something the platform does not measure.
 
 **Why this matters at the pixel.** A `0` for a cost and a `—` for "not supplied" look identical on a screen and mean opposite things. Every field below has to render as an absence, or be produced by the backend, or be dropped from the design. Rendering it as a plausible default is the one option that is not available.
 
@@ -211,6 +212,22 @@ Fields with no source:
 - `name`
 - `steps[].detail`
 
+### `listApprovals`
+
+`/api/v1/manifests/{manifest_id}/change-sets`
+
+CORRECTED THREE TIMES, and it moved BACK. It said `absent`, which had stopped being true; then `shaped`, which overstated it; then `parent-unreachable`, which was right until GET /api/v1/manifests landed. It is `shaped` again now, for the reason `shaped` originally overstated: the serving route works and the parent IS enumerable, so what remains is a shape problem rather than a reachability one. GET /api/v1/manifests/{manifest_id}/change-sets enumerates change-set approvals PER MANIFEST, so 'what is waiting on me' means walking every manifest and merging client-side. The other five approval families (plan-secret, plan-generation, activation-dossier, readonly-preflight, resolver-activation) remain GET-by-id only; the manifest-scoped routes that mention them are POSTs that CREATE an authorization, not lists. So the inbox still cannot be built — but nothing is unreachable any more. Recorded because the churn is the lesson: this entry was wrong four times and every correction came from a COMPUTATION (analyseReachability, the generated route map) refusing to agree with it, never from re-reading the prose.
+
+**What it would take:** A cross-manifest approvals collection. GET /api/v1/manifests landed, so the parent is enumerable and the collection route this entry used to ask for is DONE — do not add it again. What is still missing is one query that answers 'what is waiting on me' without walking every manifest. Whatever is added must keep the six families DISTINCT rather than flattening them into one queue: they authorize different acts, and a single 'approval' list is how an approval for one operation gets read as authorizing another — the same property `operation_kind` protects on the Proxmox side.
+
+Fields with no source:
+
+- `title`
+- `requestedBy`
+- `riskLevel`
+- `scope`
+- `operation`
+
 ### `listAuditEvents`
 
 `/api/v1/audit`
@@ -221,18 +238,17 @@ Fields with no source:
 
 - `origin`
 
-### `listEvidence`
+### `listTeardownEvidence`
 
-`/api/v1/ranges/{range_id}/teardown-evidence` · `/api/v1/onboarding/{onboarding_id}/evidence` · `/api/v1/target-discovery/{enrollment_id}/evidence`
+`/api/v1/ranges/{range_id}/teardown-evidence`
 
-Evidence exists in three unrelated, differently-shaped, separately-scoped places and there is no combined feed. TeardownEvidenceOut is the richest and carries the zero-residue proof — verdict, probe_reachable, expected_count, removed_confirmed, still_present, unproven_count. `unproven_count` has no domain field, and folding it away turns 'nobody could prove these are gone' into 'these are gone'.
+The other half of the old `listEvidence`, and the half that exists. Per-range residue verdicts: verdict, probe_reachable, expected_count, removed_confirmed, still_present, unproven_count. `unproven_count` has no domain field, and folding it away turns 'nobody could prove these are gone' into 'these are gone'. Range-scoped and reachable — `GET /api/v1/ranges` enumerates — so this is a selection step, not a backend gap. It is a READER surface rather than an adapter method: the spatial adapter has no method for it, which is part of how the two concepts came to share one name.
 
 Fields with no source:
 
 - `kind`
 - `sha256`
 - `store`
-- `subject`
 
 ### `listScores`
 
@@ -288,14 +304,6 @@ No gateway, VPN, or participant-access surface is registered. Nothing in the 230
 
 **What it would take:** An access-profile read surface. NOTE the shape carefully if it is ever added: the domain type carries `publicKeyFingerprint` and no private material, which is the right line — a profile a browser can render must never be a profile a browser could use.
 
-### `listApprovals`
-
-_No registered endpoint._
-
-Six approval families are registered — change-sets, plan-secret-authorizations, plan-generation-authorizations, activation-dossiers, readonly-preflight authorizations, resolver-activation authorizations — and EVERY one is GET-by-id only. Nothing enumerates pending approvals, so an approvals inbox cannot be built from the current surface.
-
-**What it would take:** A list route per approval family, or one cross-family queue. Whatever is added must keep the families distinct: they authorize different acts, and a single flattened 'approval' list is how an approval for one operation gets read as authorizing another.
-
 ### `listAlerts`
 
 _No registered endpoint._
@@ -303,6 +311,22 @@ _No registered endpoint._
 No alerting surface exists. The nearest real signal is RangeEventOut.level on /api/v1/ranges/{range_id}/events, but that is a per-range append-only log, not an alert stream, and treating a log line as an acknowledged-able alert invents the acknowledgement.
 
 **What it would take:** An alert surface, if alerts are a product concept. `acknowledged` implies write state the control plane does not currently hold anywhere.
+
+### `listArtifactIndex`
+
+_No registered endpoint._
+
+SPLIT FROM `listEvidence` on 2026-08-05, which named TWO concepts. This one is the org-wide content-addressed artifact index the spatial adapter wants — `kind`, `sha256`, `store` — and it has no backend at all. `secp_api.models.Artifact` has the right columns and NO writer, NO reader and NO route; it has never held a row, and there is no artifact store for its `uri` to point at. The other concept — per-range residue verdicts — is served, and is recorded separately as `listTeardownEvidence`. One entry where there were two concepts was the inventory's own version of the collision.
+
+**What it would take:** NOT a route. A producer, a store, and then a route — in that order. `GET /api/v1/evidence` written today would return an empty list forever, and an empty list reads as 'no evidence exists' where a missing route reads as 'not built yet'. Adding the route first would be the worse outcome.
+
+Fields with no source:
+
+- `kind`
+- `sha256`
+- `store`
+- `subject`
+- `time`
 
 ### `listReports`
 

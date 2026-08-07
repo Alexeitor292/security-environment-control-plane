@@ -29,6 +29,7 @@ from secp_api import audit
 from secp_api.auth import Principal
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     Permission,
     TopologyAuthoringStatus,
     TopologyRevisionStatus,
@@ -84,7 +85,7 @@ def _refuse(
             resource_id=document_id,
             actor=str(principal.user_id),
             organization_id=principal.organization_id,
-            outcome="refused",
+            outcome=AuditOutcome.refused,
             data={
                 "code": code.value,
                 **({"revision_id": str(revision_id)} if revision_id else {}),
@@ -114,7 +115,7 @@ def _require(
             resource_id=None,
             actor=str(principal.user_id),
             organization_id=principal.organization_id,
-            outcome="refused",
+            outcome=AuditOutcome.refused,
             data={"code": EC.topology_permission_denied.value, "permission": permission.value},
         )
         err = TopologyAuthoringError(EC.topology_permission_denied)
@@ -347,7 +348,7 @@ def create_draft(
         resource_id=doc.id,
         actor=str(principal.user_id),
         organization_id=principal.organization_id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={
             "revision_number": revision.revision_number,
             "content_hash": revision.content_hash,
@@ -489,7 +490,7 @@ def create_revision(
         resource_id=doc.id,
         actor=str(principal.user_id),
         organization_id=principal.organization_id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={
             "revision_number": revision.revision_number,
             "parent_revision_number": current.revision_number,
@@ -596,7 +597,7 @@ def validate_revision(
         resource_id=result.id,
         actor=str(principal.user_id),
         organization_id=principal.organization_id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={
             "revision_number": revision.revision_number,
             "content_hash": revision.content_hash,
@@ -695,7 +696,7 @@ def submit_revision(
         resource_id=doc.id,
         actor=str(principal.user_id),
         organization_id=principal.organization_id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={"revision_number": revision.revision_number, "content_hash": revision.content_hash},
     )
     return revision
@@ -785,7 +786,7 @@ def _decide(
         resource_id=revision.id,
         actor=str(principal.user_id),
         organization_id=principal.organization_id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={
             "revision_number": revision.revision_number,
             "content_hash": revision.content_hash,

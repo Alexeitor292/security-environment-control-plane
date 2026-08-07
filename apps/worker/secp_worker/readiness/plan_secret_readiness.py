@@ -36,6 +36,7 @@ from datetime import UTC, datetime
 from secp_api import audit
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     PlanSecretPurpose,
     PlanSecretReadinessOutcome,
     ReadinessOperationKind,
@@ -216,7 +217,7 @@ def run_plan_secret_readiness(  # noqa: C901,PLR0912,PLR0915 - one explicit bran
             resource_id=manifest_id,
             organization_id=organization_id,
             actor="worker",
-            outcome="refused",
+            outcome=AuditOutcome.refused,
             data={
                 "operation_kind": ReadinessOperationKind.plan_secret_readiness.value,
                 "provisioning_manifest_id": str(manifest_id),

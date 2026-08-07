@@ -21,6 +21,7 @@ from datetime import UTC, datetime, timedelta
 from secp_api import audit
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     DeploymentFailureCode,
     DeploymentOperationKind,
     DeploymentOperationStatus,
@@ -231,7 +232,7 @@ def claim_and_process_one(
             resource_id=dep.id,
             organization_id=dep.organization_id,
             actor="worker",
-            outcome="success" if outcome.ok else "failure",
+            outcome=AuditOutcome.success if outcome.ok else AuditOutcome.failed,
             data={
                 "operation_kind": op.operation_kind.value,
                 "status": dep.status.value,

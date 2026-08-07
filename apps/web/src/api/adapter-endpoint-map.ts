@@ -29,6 +29,15 @@ export type MappingStatus =
   | "shaped"
   /** No registered route returns this at all. `requires` says what P7-A would have to add. */
   | "absent"
+  /**
+   * A route serves it, and nothing enumerates the id that route requires.
+   *
+   * A THIRD thing, not a flavour of the other two, and the distinction decides who does the work.
+   * `absent` needs a new route; this needs a new COLLECTION route and must not rebuild the
+   * serving route, which already works. Computed by `analyseReachability`, never judged — see
+   * `reachability.ts` for the three separate bugs that judging it by eye produced.
+   */
+  | "parent-unreachable"
   /** Deliberately not served, and must stay that way. `requires` says why. */
   | "withheld";
 
@@ -80,7 +89,7 @@ export const ADAPTER_METHODS = [
   "listApprovals",
   "listAlerts",
   "listAuditEvents",
-  "listEvidence",
+  "listArtifactIndex",
   "listScores",
   "listReports",
   "listUsers",
@@ -89,6 +98,17 @@ export const ADAPTER_METHODS = [
 ] as const;
 
 export type AdapterMethod = (typeof ADAPTER_METHODS)[number];
+
+/**
+ * Surfaces the READER serves that the adapter has no method for.
+ *
+ * `listTeardownEvidence` is here because the spatial adapter never had a method for per-range
+ * residue verdicts — it had `listEvidence`, which meant the artifact index. The two concepts
+ * sharing one name is exactly why one of them had no entry of its own.
+ */
+export const READER_SURFACES = ["listTeardownEvidence"] as const;
+
+export type DocumentedSurface = AdapterMethod | (typeof READER_SURFACES)[number];
 
 export const ADAPTER_ENDPOINT_MAP: readonly AdapterMapping[] = [
   {
@@ -340,18 +360,33 @@ export const ADAPTER_ENDPOINT_MAP: readonly AdapterMapping[] = [
   },
   {
     method: "listApprovals",
-    status: "absent",
-    endpoints: [],
+    status: "shaped",
+    endpoints: ["/api/v1/manifests/{manifest_id}/change-sets"],
     note:
-      "Six approval families are registered — change-sets, plan-secret-authorizations, "
-      + "plan-generation-authorizations, activation-dossiers, readonly-preflight authorizations, "
-      + "resolver-activation authorizations — and EVERY one is GET-by-id only. Nothing enumerates "
-      + "pending approvals, so an approvals inbox cannot be built from the current surface.",
-    unsourcedFields: [],
+      "CORRECTED THREE TIMES, and it moved BACK. It said `absent`, which had stopped being "
+      + "true; then `shaped`, which overstated it; then `parent-unreachable`, which was right "
+      + "until GET /api/v1/manifests landed. It is `shaped` again now, for the reason `shaped` "
+      + "originally overstated: the serving route works and the parent IS enumerable, so what "
+      + "remains is a shape problem rather than a reachability one. "
+      + "GET /api/v1/manifests/{manifest_id}/change-sets enumerates change-set approvals PER "
+      + "MANIFEST, so 'what is waiting on me' means walking every manifest and merging "
+      + "client-side. The other five approval families (plan-secret, plan-generation, "
+      + "activation-dossier, readonly-preflight, resolver-activation) remain GET-by-id only; "
+      + "the manifest-scoped routes that mention them are POSTs that CREATE an authorization, "
+      + "not lists. So the inbox still cannot be built — but nothing is unreachable any more. "
+      + "Recorded because the churn is the lesson: this entry was wrong four times and every "
+      + "correction came from a COMPUTATION (analyseReachability, the generated route map) "
+      + "refusing to agree with it, never from re-reading the prose.",
+    unsourcedFields: ["title", "requestedBy", "riskLevel", "scope", "operation"],
     requires:
-      "A list route per approval family, or one cross-family queue. Whatever is added must keep "
-      + "the families distinct: they authorize different acts, and a single flattened 'approval' "
-      + "list is how an approval for one operation gets read as authorizing another.",
+      "A cross-manifest approvals collection. GET /api/v1/manifests landed, so the parent is "
+      + "enumerable and the collection route this entry used to ask for is DONE — do not add it "
+      + "again. What is still missing is one query that answers 'what is waiting on me' without "
+      + "walking every manifest. "
+      + "Whatever is added must keep the six families DISTINCT rather than flattening them into "
+      + "one queue: they authorize different acts, and a single 'approval' list is how an "
+      + "approval for one operation gets read as authorizing another — the same property "
+      + "`operation_kind` protects on the Proxmox side.",
   },
   {
     method: "listAlerts",
@@ -376,20 +411,38 @@ export const ADAPTER_ENDPOINT_MAP: readonly AdapterMapping[] = [
     unsourcedFields: ["origin"],
   },
   {
-    method: "listEvidence",
-    status: "shaped",
-    endpoints: [
-      "/api/v1/ranges/{range_id}/teardown-evidence",
-      "/api/v1/onboarding/{onboarding_id}/evidence",
-      "/api/v1/target-discovery/{enrollment_id}/evidence",
-    ],
+    method: "listArtifactIndex",
+    status: "absent",
+    endpoints: [],
     note:
-      "Evidence exists in three unrelated, differently-shaped, separately-scoped places and there "
-      + "is no combined feed. TeardownEvidenceOut is the richest and carries the zero-residue "
-      + "proof — verdict, probe_reachable, expected_count, removed_confirmed, still_present, "
-      + "unproven_count. `unproven_count` has no domain field, and folding it away turns 'nobody "
-      + "could prove these are gone' into 'these are gone'.",
-    unsourcedFields: ["kind", "sha256", "store", "subject"],
+      "SPLIT FROM `listEvidence` on 2026-08-05, which named TWO concepts. This one is the "
+      + "org-wide content-addressed artifact index the spatial adapter wants — `kind`, `sha256`, "
+      + "`store` — and it has no backend at all. `secp_api.models.Artifact` has the right columns "
+      + "and NO writer, NO reader and NO route; it has never held a row, and there is no artifact "
+      + "store for its `uri` to point at. "
+      + "The other concept — per-range residue verdicts — is served, and is recorded separately as "
+      + "`listTeardownEvidence`. One entry where there were two concepts was the inventory's own "
+      + "version of the collision.",
+    unsourcedFields: ["kind", "sha256", "store", "subject", "time"],
+    requires:
+      "NOT a route. A producer, a store, and then a route — in that order. `GET /api/v1/evidence` "
+      + "written today would return an empty list forever, and an empty list reads as 'no evidence "
+      + "exists' where a missing route reads as 'not built yet'. Adding the route first would be "
+      + "the worse outcome.",
+  },
+  {
+    method: "listTeardownEvidence",
+    status: "shaped",
+    endpoints: ["/api/v1/ranges/{range_id}/teardown-evidence"],
+    note:
+      "The other half of the old `listEvidence`, and the half that exists. Per-range residue "
+      + "verdicts: verdict, probe_reachable, expected_count, removed_confirmed, still_present, "
+      + "unproven_count. `unproven_count` has no domain field, and folding it away turns 'nobody could prove these are gone' into 'these are gone'. "
+      + "Range-scoped and reachable — `GET /api/v1/ranges` enumerates — so this is a selection "
+      + "step, not a backend gap. It is a READER surface rather than an adapter method: the "
+      + "spatial adapter has no method for it, which is part of how the two concepts came to "
+      + "share one name.",
+    unsourcedFields: ["kind", "sha256", "store"],
   },
   {
     method: "listScores",
@@ -482,6 +535,207 @@ export const CREDENTIAL_INVENTORY_SEGMENTS: ReadonlySet<string> = new Set([
 export function hasCredentialInventorySegment(path: string): boolean {
   return path.split("/").some((segment) => CREDENTIAL_INVENTORY_SEGMENTS.has(segment));
 }
+
+/**
+ * What each missing surface would have to serve, and what it unblocks.
+ *
+ * `requires` on a mapping says what is needed in a sentence. This says it in enough detail for
+ * whoever owns the API to cost it: the shape, the SCOPING — which is the part that has bitten
+ * every one of these — and the screen that stays broken without it.
+ *
+ * Scoping is called out separately because it is the recurring failure, not a detail. Six of the
+ * gaps below are not "the concept does not exist"; they are "the concept exists but only under a
+ * parent the operator has to name first". An audit page cannot ask for evidence across an
+ * organization, and an approvals inbox cannot ask what is waiting, because every route demands an
+ * id the screen is trying to discover.
+ */
+export interface MissingSurface {
+  readonly method: DocumentedSurface | "auditOutcomeFacet" | "workerLiveness";
+  /**
+   * Which side owns the fix. `frontend` entries are listed so they are not mistaken for backend
+   * asks — `listEvidence` spent a day on P7-A's list before anyone checked that ranges are
+   * enumerable and the only thing missing was a picker.
+   */
+  readonly owner: "backend" | "frontend";
+  /**
+   * A missing ROUTE can be written this week. A missing CAPABILITY means the system does not
+   * observe or store the thing at all — there is no producer to expose. Two very different
+   * tickets, and collapsing them makes the second look like the first.
+   */
+  readonly blockedOn: "route" | "capability" | "selection";
+  /** A suggested route. NOT a proposal to implement as written — the shape matters, not the path. */
+  readonly sketch: string;
+  /** The scoping the frontend needs, and why the obvious parent-scoped version does not serve. */
+  readonly scoping: string;
+  /** What stays broken without it. */
+  readonly unblocks: string;
+}
+
+export const MISSING_SURFACES: readonly MissingSurface[] = [
+  {
+    method: "listArtifactIndex",
+    owner: "backend",
+    blockedOn: "capability",
+    sketch: "no new route — GET /api/v1/ranges then /ranges/{range_id}/teardown-evidence",
+    scoping:
+      "PARENT-NOT-SELECTED, and therefore NOT a backend ask. The eight evidence routes are all "
+      + "scoped to a parent id, but `GET /api/v1/ranges` exists, so the range-scoped one is "
+      + "reachable behind a picker. This was on the backend list until the parent was checked. "
+      + "The org-wide question — evidence across an organization — is a genuinely different "
+      + "surface, and worth raising only if a screen needs it. What blocks the audit page today "
+      + "is a selection step. Original note: all eight evidence routes are scoped to a parent — "
+      + "range, onboarding, enrollment, dossier, authorization, registration — so a surface can "
+      + "only show evidence for a subject somebody already named. The audit page's job is the "
+      + "opposite: find the subject FROM the evidence.",
+    unblocks:
+      "The evidence half of the audit surface, behind a range picker. `GET /api/v1/audit` serves "
+      + "the action log org-wide with no picker, so the two halves of that page ask for their "
+      + "scope differently — which is a design problem, not a missing route.",
+  },
+  {
+    method: "listApprovals",
+    owner: "backend",
+    blockedOn: "route",
+    sketch: "GET /api/v1/approvals?status=pending",
+    scoping:
+      "NOT manifest-scoped. Change-sets are already enumerable per manifest; the missing question "
+      + "is 'what is waiting on me', which cannot name a manifest in advance.",
+    unblocks:
+      "An approvals inbox. Keep the six families DISTINCT in whatever is returned — they "
+      + "authorize different acts, and one flattened queue is how an approval for one operation "
+      + "gets read as authorizing another.",
+  },
+  {
+    method: "listEvents",
+    owner: "backend",
+    blockedOn: "route",
+    sketch: "GET /api/v1/competitions",
+    scoping: "Organization-wide. `/ranges/{id}/competition` serves one, given a range.",
+    unblocks:
+      "Any competition index. Note separately that CompetitionOut carries no phases, schedule, "
+      + "announcements or participant counts, so the product's 'event' is only partly modelled "
+      + "even once a list exists — that is a modelling question, not a routing one.",
+  },
+  {
+    method: "listUsers",
+    owner: "backend",
+    blockedOn: "route",
+    sketch: "GET /api/v1/users",
+    scoping: "Organization-wide. `/me` is the current principal only.",
+    unblocks:
+      "Any surface naming a person other than the viewer. Carry `is_dev_fallback` through: a "
+      + "development-fallback identity must never render as a real account.",
+  },
+  {
+    method: "listAlerts",
+    owner: "backend",
+    blockedOn: "capability",
+    sketch: "GET /api/v1/alerts",
+    scoping: "Organization-wide, and it needs write state — `acknowledged` is a fact the control "
+      + "plane would have to hold, which nothing does today.",
+    unblocks:
+      "An alerting surface. `RangeEventOut.level` is the nearest real signal but it is a "
+      + "per-range append-only log; treating a log line as acknowledge-able invents the "
+      + "acknowledgement.",
+  },
+  {
+    method: "listReports",
+    owner: "backend",
+    blockedOn: "capability",
+    sketch: "GET /api/v1/reports",
+    scoping:
+      "Organization-wide, and it is the one gap where scoping is not the hard part. Nothing "
+      + "generates, lists or stores a report, so there is no existing route with the wrong scope "
+      + "to widen — the concept is absent rather than misplaced.",
+    unblocks:
+      "Reporting, entirely. Nothing generates, lists or stores a report — this is a product "
+      + "concept that does not exist rather than a routing gap.",
+  },
+  {
+    method: "auditOutcomeFacet",
+    owner: "backend",
+    blockedOn: "route",
+    sketch: "GET /api/v1/audit/outcomes  (or a `facets` block on the audit response)",
+    scoping:
+      "NO-ENDPOINT. Not a scoping problem at all — no route publishes the DISTINCT SET of audit "
+      + "outcomes, so a filter can only offer the outcomes that appear in the rows currently "
+      + "loaded. The set shrinks as you page, and an outcome with no rows on this page looks "
+      + "like an outcome that never happens.",
+    unblocks:
+      "A truthful outcome filter on the audit surface. Without it the control is a summary of the "
+      + "current page wearing the clothes of a filter over the whole log.",
+  },
+  {
+    method: "workerLiveness",
+    owner: "backend",
+    blockedOn: "capability",
+    sketch: "a heartbeat, then GET /api/v1/workers with a last-seen and a reachability state",
+    scoping:
+      "NOT a field gap, which is how it was first measured. WorkersPage splits the whole page into "
+      + "online and offline, drives its unserved-targets panel from that split, and renders four "
+      + "columns from `status`, `taskQueues`, `lastHeartbeat` and `version`. None of those exists "
+      + "on the wire, and the reason is deeper than five missing fields: NOTHING IN THIS SYSTEM "
+      + "OBSERVES WORKER LIVENESS. `WorkerNodeOut` and `EnrollmentStatusOut` carry timestamps, "
+      + "revisions and fingerprints — no heartbeat, no last-seen, nothing meaning 'reachable now'.",
+    unblocks:
+      "WorkersPage, which is currently unbuildable rather than degraded. And a warning for whoever "
+      + "builds it: `enrollmentState: healthy` is NOT `status: online`. Enrollment is a lifecycle "
+      + "record; liveness is a heartbeat. Mapping one to the other asserts the single fact an "
+      + "operator most needs during an incident, from a record that cannot know it.",
+  },
+  {
+    method: "listAccessProfiles",
+    owner: "backend",
+    blockedOn: "route",
+    sketch: "GET /api/v1/access-profiles?team_id=",
+    scoping: "Team-scoped is fine here; the team id is on screen when the question is asked.",
+    unblocks:
+      "Participant access surfaces. If it is added: public metadata ONLY. The domain type carries "
+      + "`publicKeyFingerprint` and no private material, which is the right line — a profile a "
+      + "browser can render must never be a profile a browser could use.",
+  },
+];
+
+/**
+ * What a route serving each unserved method would have to look like, so "absent" can be CHECKED.
+ *
+ * The map verified that every claimed endpoint exists. Nothing verified the other direction — that
+ * a method marked `absent` still has no route — and `listApprovals` duly went stale: change-sets
+ * became enumerable per manifest and the entry still said nothing served it. An unverified
+ * "absent" is the optimistic kind of wrong: it under-reports the API, so a frontend keeps working
+ * around a gap that closed.
+ *
+ * Each entry is a predicate over a registered path. It matches on whole SEGMENTS or on a suffix,
+ * never a bare substring — a substring match is what let a family check pass while covering one of
+ * two paths elsewhere in this repo. A match does not mean the method is served; it means somebody
+ * has to look and re-decide, which is the same contract the documentation-module pin uses.
+ */
+export const UNSERVED_METHOD_PROBES: Readonly<Record<string, (path: string) => boolean>> = {
+  listEvents: (path) => path.replace(/\/$/, "").endsWith("/competitions"),
+  listAlerts: (path) => path.split("/").includes("alerts"),
+  listReports: (path) => path.split("/").includes("reports"),
+  listUsers: (path) => {
+    const segments = path.split("/");
+    return segments.includes("users") || segments.includes("principals");
+  },
+  listAccessProfiles: (path) => {
+    const segments = path.split("/");
+    return (
+      segments.includes("access-profiles") ||
+      segments.includes("vpn") ||
+      segments.includes("gateways")
+    );
+  },
+  listSecretRefs: hasCredentialInventorySegment,
+  // ORG-WIDE only. Eight parent-scoped evidence routes already exist and none of them serves an
+  // index — a probe matching any `evidence` segment would fire on all eight and report the gap
+  // closed. What would close it is a route with no path parameter at all.
+  listArtifactIndex: (path) => {
+    const segments = path.split("/");
+    if (segments.includes("artifacts")) return true;
+    return segments.includes("evidence") && !path.includes("{");
+  },
+};
 
 /** Convenience: every method the transport layer can serve against `main` today. */
 export function servedMethods(): readonly AdapterMapping[] {
