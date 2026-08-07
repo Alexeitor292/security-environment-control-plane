@@ -94,6 +94,20 @@ const ABSOLUTE_CLAIM =
  * changed count fails and has to be re-justified.
  */
 const ACKNOWLEDGED: [file: string, phrase: string, count: number][] = [
+  // REVIEWED 2026-08-05 when wiring AuditPage brought it into scope, which is
+  // what section 4.7 of the migration matrix said would happen. `AuditPage`
+  // imports `control-plane-reader`, whose `listWorkers` is built on
+  // `placement-view`, so a module nothing imported directly became renderable
+  // through two hops.
+  //
+  // The claim is `FRESHNESS_LABEL.never_completed` -- "never completed" -- and it
+  // describes an OBSERVABLE DATA STATE, not enforcement: a discovery that has not
+  // finished. It is precisely the distinction that module's own tests defend
+  // ("never completed" is not "stale"; absence of evidence is not evidence of
+  // age). Collapsing it would be the unknown-versus-negative error, not avoiding
+  // one. Kept, and reviewed at the moment of wiring as the rule requires.
+  ["domain/proxmox/placement-view.ts", "never", 1],
+
   // "sealed enclave" is the NAME of a network segment in a cyber-range scenario
   // fixture, not an assertion about the platform's own enforcement.
   ["spatial/apps/deployments/prototype/mocks/deployments.ts", "sealed", 1],
@@ -370,6 +384,19 @@ describe("security-property claims", () => {
     // host" is unacknowledged by construction and fails here. The message tells
     // whoever trips it what the choice is, because they will not have read the
     // header.
+    //
+    // IT CARRIES ITS OWN FLOOR. "No unacknowledged claim was found" is the
+    // natural shape for a boundary guard and it passes vacuously on an empty
+    // scan. Measured 2026-08-05 by emptying the glob: four other tests in this
+    // file went red and this one stayed GREEN. That is enough protection today
+    // and it is protection by neighbours -- separable, skippable, deletable. The
+    // assertion that must never lie should not depend on which of its siblings
+    // still exist.
+    expect(
+      Object.keys(PAGE_SOURCES).length,
+      "nothing was scanned; an empty result here means nothing",
+    ).toBeGreaterThan(350);
+
     const unacknowledged: string[] = [];
 
     for (const [key, count] of absoluteClaims()) {
