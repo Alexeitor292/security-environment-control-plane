@@ -205,10 +205,57 @@ an expired observation alive indefinitely. `unverifiable` refuses distinctly fro
 different operator actions, and reporting the second as the first sends someone to fix a target that
 may be fine. The freshness bound is a property of the contract, not a caller's argument.
 
+### The executable surface (§3) — the grammar exists; retiring the seal is BLOCKED
+
+**Landed.** `provisioning/command_grammar.py` is the only place an OpenTofu argv is built.
+`OpenTofuRunner`'s four argv builders are now call sites into it rather than a second copy, and a
+test keyed on argv construction — not on a name — proves the engine contains no list literal
+holding an OpenTofu verb. §3 asks for "a derived grammar rather than a hand-maintained list, so a
+reviewed operation and an executable command are the same fact"; a shared builder gives that by
+construction, where an allowlist would be a second artifact free to drift open. The plan path is
+derived from the workspace rather than supplied, so no caller-controlled path component appears in
+any argv, and the grammar module imports neither `subprocess`, `os` nor a network client, so
+building a command can never be running one.
+
+**Blocked, and this ADR is the reason.** The executor-side half — `SubprocessProcessExecutor`
+re-deriving each command and refusing anything the grammar cannot produce — cannot land, because
+it requires retiring `_B1A_SUBPROCESS_SEALED`, and that constant is not local to the worker:
+
+- it exists in **two** modules, `provisioning/process_executor.py` and `provisioning/activation.py`,
+  and is read by 21 files across four planes;
+- `secp_management.topology.read_seals()` reads **both** copies to populate two fields of
+  `SealState`;
+- those two fields, `b1a_subprocess_sealed_activation` and `b1a_subprocess_sealed_executor`, are
+  **required members of `BootstrapEvidence`** (`secp_management/evidence.py`) — a strict
+  (`extra='forbid'`, `frozen`), canonical, digest-bearing document whose `canonical()` is a full
+  `model_dump()`, so both booleans are inside `digest()`, which carries an independently verified
+  Ed25519 attestation.
+
+Removing the constant therefore changes `SealState`/`read_seals` and the field set of a signed
+bootstrap evidence document — invalidating the digest of every evidence document already issued.
+`CLAUDE.md` §2 makes changing a bootstrap seal an unconditional prohibition with no unlock path,
+and the paragraph above in this ADR states that "the trust-root and bootstrap seals are untouched".
+Both cannot hold at once: **ADR-030 retires an execution seal that a bootstrap-seal record requires
+to exist.** That is a defect in this ADR, not in the code implementing it.
+
+Resolving it is an owner decision, not an engineering one, and the shape of the fix determines the
+work: either the two booleans stay in `BootstrapEvidence` and are populated from the behavioural
+probe instead of the constants (preserving the field set and every existing digest), or they are
+retired behind a versioned evidence contract with the `finalization: … | None` idiom the document
+already uses for adding a field without breaking byte-identity. The first is far cheaper and keeps
+the attestation stable; it also changes what the field *means*, from "a constant is True" to "the
+surface refuses", which is the direction the seal census already moved in.
+
+Until that is decided, `settings.enable_opentofu_subprocess` remains a live §2 concern: today the
+seal makes that branch of `build_process_executor` dormant, but the branch is written and would
+become a real ambient bypass the moment the seal is retired without removing it. It must be deleted
+in the same change, not after.
+
 **What is not yet true.** No production path calls `authorize_provisioning_execution`; there is no
-provisioning enqueue endpoint, and `advance` has no callers. The derivation and its gate exist and
-are tested; the executor that would consult them does not. Nothing in this section should be read
-as evidence that a real operation can run.
+provisioning enqueue endpoint; the dispatchability gate is not installed in `advance` (above); and
+the real executor remains unconstructible. `run_real_provisioning` still refuses any executor not
+marked fake-only. Nothing in this section should be read as evidence that a real operation can run,
+and no live infrastructure has been contacted.
 
 ## Consequences
 
