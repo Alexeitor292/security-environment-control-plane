@@ -40,6 +40,7 @@ from datetime import UTC, datetime
 from secp_api import audit
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     PlanExecutionReason,
     PlanGenerationAttemptStatus,
     ReadinessReason,
@@ -752,7 +753,7 @@ def _refuse(
             resource_id=manifest.id,
             organization_id=manifest.organization_id,
             actor="worker",
-            outcome="refused",
+            outcome=AuditOutcome.refused,
             data={
                 "operation_kind": "real_plan_generation",
                 "provisioning_manifest_id": str(manifest.id),

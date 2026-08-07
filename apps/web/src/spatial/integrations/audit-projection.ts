@@ -15,9 +15,16 @@
 //    dropping unrecognised rows is the worst option available, because hiding an
 //    entry is the specific failure an audit page exists to prevent.
 //
-//    So nothing is coerced. A value outside the known three is carried through
-//    VERBATIM and rendered in a neutral tone, exactly as an undetermined
-//    capability is. The reader sees `revoked` and reads `revoked`.
+//    So nothing is coerced. EVERY value is carried through VERBATIM -- this
+//    module does not classify them at all. The reader sees `revoked` and reads
+//    `revoked`.
+//
+//    Colour is a separate question with a separate owner: the design system's
+//    `toneForState`, which classifies five of the seven (`success` ok;
+//    `denied`/`failed`/`revoked`/`expired` error) and resolves the two it has
+//    never been told about -- `refused`, `failure` -- to `unknown` rather than to
+//    a healthy default. Deciding tone here, from what the migrated domain type
+//    happened to allow, is what put `revoked` in a neutral badge.
 //
 // 2. `origin` HAS NO SOURCE ON THE WIRE. `AuditEventOut` publishes `id`,
 //    `action`, `actor`, `created_at`, `data`, `outcome`, `resource_id` and
@@ -43,29 +50,29 @@ import type { components } from "../../api/generated/openapi";
 
 type AuditEventOut = components["schemas"]["AuditEventOut"];
 
-/** The three the migrated surface has tones for. Not the full server vocabulary. */
-export const TONED_OUTCOMES = ["success", "denied", "failed"] as const;
-
-export type TonedOutcome = (typeof TONED_OUTCOMES)[number];
-
-/**
- * An outcome as it will be displayed.
- *
- * `toned` is non-null only for the three values with a designed tone. Everything
- * else keeps `raw` and renders neutrally — which is what makes an eighth value
- * appearing on the wire a display question rather than a correctness one.
- */
-export interface OutcomeView {
-  readonly raw: string;
-  readonly toned: TonedOutcome | null;
-}
-
-export function outcomeView(raw: string): OutcomeView {
-  const toned = (TONED_OUTCOMES as readonly string[]).includes(raw)
-    ? (raw as TonedOutcome)
-    : null;
-  return { raw, toned };
-}
+// WHAT USED TO BE HERE, AND WHY IT IS NOT.
+//
+// This module exported `TONED_OUTCOMES` / `TonedOutcome` / `OutcomeView`, where
+// `toned` was non-null for the three values the MIGRATED DOMAIN TYPE allows. It
+// read as "does this surface have a tone for it" and meant "is this in
+// `models/types.ts`'s union" — two different questions.
+//
+// The audit page asked it the first way and picked a badge colour from the
+// answer, so `revoked` and `expired` rendered in the neutral "we don't know"
+// badge although `STATE_TONE` has always classified both as errors: grey with a
+// question mark, in a ledger where `failed` is red. Under-claimed severity, which
+// is the direction someone gets hurt.
+//
+// The tone now comes from `toneForState`, the design system's own map, whose
+// documented rule is that an unrecognised state resolves to `unknown` and never
+// to a healthy default. That left `toned` with no consumers — and an unused
+// export encoding the inadequate type is what made "three" feel authoritative in
+// the first place, so it is gone rather than deprecated.
+//
+// THE DON'T-COERCE PROPERTY DID NOT GO WITH IT. It moved to where it is visible:
+// `AuditPage.render.test.tsx` asserts every server outcome reaches the DOM as its
+// own word. That is strictly stronger than asserting a flag, because the flag
+// could be correct while the render collapses it.
 
 /**
  * A field the control plane does not supply.
@@ -84,7 +91,8 @@ export interface AuditRowView {
   readonly action: string;
   /** `resource_type` and `resource_id` composed; the id is null for org-wide acts. */
   readonly resource: string;
-  readonly outcome: OutcomeView;
+  /** The server's word, carried unchanged. Toning is the renderer's business. */
+  readonly outcome: string;
   /** No wire source. Always `NOT_SUPPLIED` — see the header. */
   readonly origin: NotSupplied;
 }
@@ -98,7 +106,7 @@ export function auditRow(event: AuditEventOut): AuditRowView {
     resource: event.resource_id
       ? `${event.resource_type} ${event.resource_id}`
       : event.resource_type,
-    outcome: outcomeView(event.outcome),
+    outcome: event.outcome,
     origin: NOT_SUPPLIED,
   };
 }

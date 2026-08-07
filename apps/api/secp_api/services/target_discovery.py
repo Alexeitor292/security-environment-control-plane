@@ -23,6 +23,7 @@ from secp_api.auth import Principal
 from secp_api.discovery_contract import discovery_operation_fingerprint
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     DiscoveryDecisionCode,
     DiscoveryJobStatus,
     OnboardingStatus,
@@ -354,7 +355,7 @@ def reject_candidate_plan(
         resource_id=row.id,
         organization_id=row.organization_id,
         actor=str(actor.user_id),
-        outcome="denied",
+        outcome=AuditOutcome.denied,
         data={"enrollment_version": row.enrollment_version},
     )
     return row

@@ -20,12 +20,20 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { renderUnsourcedFieldsDoc } from "../src/api/unsourced-fields-doc.ts";
+import {
+  renderAbsentEndpointsDoc,
+  renderUnsourcedFieldsDoc,
+} from "../src/api/unsourced-fields-doc.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..", "..", "..");
-const OUTPUT = resolve(REPO_ROOT, "docs", "product", "unsourced-fields.md");
+const PRODUCT_DOCS = resolve(REPO_ROOT, "docs", "product");
 
-await mkdir(dirname(OUTPUT), { recursive: true });
-await writeFile(OUTPUT, renderUnsourcedFieldsDoc(), "utf8");
-console.log("wrote docs/product/unsourced-fields.md");
+await mkdir(PRODUCT_DOCS, { recursive: true });
+for (const [name, render] of [
+  ["unsourced-fields.md", renderUnsourcedFieldsDoc],
+  ["absent-endpoints.md", renderAbsentEndpointsDoc],
+]) {
+  await writeFile(resolve(PRODUCT_DOCS, name), render(), "utf8");
+  console.log(`wrote docs/product/${name}`);
+}
