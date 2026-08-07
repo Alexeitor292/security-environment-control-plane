@@ -190,6 +190,32 @@ class WorkerEnrollmentSigner(_NonSerializable):
             digest=digest,
         )
 
+    def sign_discovery_snapshot(self, digest: str) -> DetachedAttestation:
+        """Sign a discovery snapshot binding, under the DISCOVERY domain and kind.
+
+        This method lives here rather than on a second signer because there is one worker key, and
+        a second object holding it would be a second place the private key can leak from. The
+        alternative considered was a discovery-specific signer reading the same protected pair —
+        which is exactly the "second identity model" trap this repository has already sprung four
+        times.
+
+        The domain and kind are DIFFERENT from the enrollment ones, and that separation is the
+        load-bearing part: a detached attestation verifies against a domain, so an enrollment
+        proof-of-possession can never be replayed as a discovery snapshot signature, and vice
+        versa. They are imported here rather than re-declared, so the two ends cannot drift.
+        """
+        from secp_api.discovery_verification import (
+            DISCOVERY_SNAPSHOT_DOMAIN,
+            DISCOVERY_SNAPSHOT_KIND,
+        )
+
+        return sign_detached(
+            self._private_key_hex,
+            domain=DISCOVERY_SNAPSHOT_DOMAIN,
+            kind=DISCOVERY_SNAPSHOT_KIND,
+            digest=digest,
+        )
+
 
 @dataclass(frozen=True)
 class EnrollmentInvitationInputs:
