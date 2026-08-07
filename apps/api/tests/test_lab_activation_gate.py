@@ -204,22 +204,55 @@ def test_disabled_application_mode_is_refused(session, principal, lab_env):
         )
 
 
-def test_real_provisioning_setting_required(session, principal, lab_env):
-    env = lab_env()
-    settings = Settings(
+def test_no_settings_value_gates_the_real_path_any_more(session, principal, lab_env):
+    """INVERTED by ADR-030 §2. This required ``SECP_ENABLE_REAL_PROVISIONING=true`` and asserted
+    the refusal without it.
+
+    That check was an ambient bypass: a deployment-wide boolean that widened what may execute. It
+    could not express "this operation, this worker, this approved change set, now", and while a seal
+    made it dormant it was tolerable -- retiring the seal made it live. The field is deleted from
+    ``Settings`` rather than defaulted False, because a field that exists is a field a deployment
+    can set.
+
+    So the property now is the absence of the gate: two settings that differ only in the retired
+    field are the SAME settings, and neither permits nor forbids anything. Whether this operation
+    may execute is answered by ``authorize_provisioning_execution`` against durable rows, which
+    consults no setting at all -- and the routing/dispatch refusals asserted elsewhere in this
+    module still hold, so this is not a claim that the path became open.
+    """
+    assert "enable_real_provisioning" not in Settings.model_fields
+    assert "enable_opentofu_subprocess" not in Settings.model_fields
+
+    # Passing the retired key is accepted-and-ignored (``Settings`` does not forbid extras), which
+    # is what makes a stale value in a deployment's environment inert rather than authorising.
+    with_stale_key = Settings(
         app_env="test",
         provisioning_application_mode="isolated_lab",
         workflow_dispatch_mode="temporal",
+        enable_real_provisioning=True,
     )
-    with pytest.raises(ProvisioningRefusedError, match="real provisioning is disabled"):
-        run_real_provisioning(
-            session,
-            env.manifest.id,
-            ProvisioningOperationKind.dry_run,
-            executor=_exec(env.manifest),
-            settings=settings,
-            dispatch_mode="temporal",
-        )
+    assert not hasattr(with_stale_key, "enable_real_provisioning")
+    assert with_stale_key.model_dump() == REAL_ON.model_dump()
+
+    # And the authority derivation -- the thing that DOES decide -- reads no setting.
+    import inspect
+
+    from secp_api import provisioning_execution_authority as authority
+
+    assert (
+        "settings" not in inspect.signature(authority.authorize_provisioning_execution).parameters
+    )
+    # AST, not a substring scan: the module's docstring says it consults no environment variable
+    # and no settings field, so scanning its text for those words reads that sentence as the thing
+    # it forbids. Asking whether the CODE names them is the actual property.
+    import ast
+
+    tree = ast.parse(inspect.getsource(authority))
+    referenced = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)} | {
+        n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)
+    }
+    for banned in ("get_settings", "Settings", "environ", "getenv"):
+        assert banned not in referenced, banned
 
 
 # --- #6 drift invalidates execution ------------------------------------------
