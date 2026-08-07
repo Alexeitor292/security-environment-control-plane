@@ -843,12 +843,8 @@ def run_real_provisioning(
     in as a claim, not serialized into Temporal, and not cached as still-valid: a caller can supply
     only identifiers and what its own filesystem measures.
     """
-    from secp_worker.provisioning.activation import (
-        authorized_executor_for_operation,
-        build_process_executor,
-    )
+    from secp_worker.provisioning.activation import build_process_executor
     from secp_worker.provisioning.opentofu import OpenTofuRunner
-    from secp_worker.provisioning.rendering import WorkspaceRenderer
     from secp_worker.provisioning.toolchain_verify import FakeToolchainVerifier
 
     settings = settings or get_settings()
