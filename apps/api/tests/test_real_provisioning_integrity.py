@@ -146,7 +146,18 @@ def test_dry_run_persists_only_canonical_change_set(session, principal, lab_env)
 
 
 def test_injected_non_fake_executor_is_refused_without_process(session, principal, lab_env):
-    """An injected non-fake executor is refused before any process call (defense-in-depth)."""
+    """An injected non-fake executor is refused before any process call.
+
+    The refusal used to be "not approved for B1-A fake-only execution" — a seal that made every
+    real executor unreachable and, in doing so, made the LIVE-EVIDENCE requirement standing behind
+    it dead code marked ``pragma: no cover - unreachable``. ADR-030 retired the seal, so the
+    evidence requirement is now the operative check and this target's simulated onboarding evidence
+    is what refuses.
+
+    That is a stronger property, not a weaker one: the old refusal rejected the executor for being
+    the wrong TYPE, which a sufficiently fake-looking object would have passed. This one rejects
+    the OPERATION for not having been proven live, which no executor can talk its way around.
+    """
 
     class _Evil:  # not marked b1a_fake_only
         def __init__(self):
@@ -158,7 +169,7 @@ def test_injected_non_fake_executor_is_refused_without_process(session, principa
 
     env = lab_env()
     evil = _Evil()
-    with pytest.raises(ProvisioningRefusedError, match="not approved for B1-A"):
+    with pytest.raises(ProvisioningRefusedError, match="live_verified onboarding evidence"):
         run_real_provisioning(
             session,
             env.manifest.id,

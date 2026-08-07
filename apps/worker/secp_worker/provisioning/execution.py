@@ -747,6 +747,65 @@ def _resolve_lab_secret_env(
     return build_lab_secret_env(target.config, token)
 
 
+def _render_once(session, operation: ProvisioningOperation, manifest, profile):
+    """Render the workspace the authority will name and the executor will apply. No process runs.
+
+    Rendering is pure — it builds strings from the manifest and the profile — so it is safe to do
+    before any authorization exists. What it produces is the ``content_hash`` that ties the approved
+    change set, the authority and the applied plan to one artifact.
+    """
+    from secp_worker.provisioning.rendering import RenderingError, WorkspaceRenderer
+
+    try:
+        return WorkspaceRenderer().render(manifest.content, profile.content)
+    except RenderingError:
+        _refuse_real(session, operation, "workspace rendering refused (redacted)")
+
+
+def _authorized_executor(
+    session,
+    operation: ProvisioningOperation,
+    *,
+    worker_installation_id: str,
+    toolchain_layout,
+    rendered_workspace_hash: str,
+):
+    """Derive the durable execution authority and build the real executor, or refuse.
+
+    The two failure modes are kept distinct all the way to the operator-visible refusal. A
+    measurement failure says nobody could read this worker's toolchain; an authority refusal says
+    it was read and is not the authorized one. Collapsing them would send an operator to re-pin a
+    profile when the real problem is an unreadable mirror.
+    """
+    from secp_api.provisioning_execution_authority import ExecutionAuthorityRefused
+
+    from secp_worker.provisioning.activation import authorized_executor_for_operation
+    from secp_worker.provisioning.toolchain_verify import ToolchainMeasurementError
+
+    try:
+        return authorized_executor_for_operation(
+            session,
+            operation_id=operation.id,
+            organization_id=operation.organization_id,
+            worker_installation_id=worker_installation_id,
+            toolchain_layout=toolchain_layout,
+            rendered_workspace_hash=rendered_workspace_hash,
+        )
+    except ToolchainMeasurementError as exc:
+        _refuse_real(
+            session,
+            operation,
+            f"this worker's toolchain could not be measured ({exc.reason}); real execution "
+            "requires a readable, attested toolchain on this worker",
+        )
+    except ExecutionAuthorityRefused as exc:
+        _refuse_real(
+            session,
+            operation,
+            f"the control plane did not authorize this execution ({exc.reason})",
+        )
+
+
 def run_real_provisioning(
     session,
     manifest_id: uuid.UUID,
@@ -758,19 +817,38 @@ def run_real_provisioning(
     secret_resolver=None,
     workspace_root: str | None = None,
     verifier=None,
+    worker_installation_id: str | None = None,
+    toolchain_layout=None,
 ) -> ProvisioningOperation:
     """Execute a REAL isolated-lab OpenTofu operation behind the full activation gate.
 
-    The process ``executor`` is worker-only (always a FakeProcessExecutor in B1-A). When
-    not injected it is produced by ``build_process_executor`` using a grant minted ONLY
-    after the full gate succeeds — and a hard B1-A seal keeps it a FakeProcessExecutor.
-    There is NO FakeOpenTofuRunner fallback on this path.
+    TWO PATHS, PRODUCED DIFFERENTLY ON PURPOSE
+    -------------------------------------------
+    * **Development / simulator.** No ``worker_installation_id`` and no ``toolchain_layout``:
+      ``build_process_executor`` returns a ``FakeProcessExecutor`` that runs nothing. This path
+      needs no live worker, no enrolment and no on-disk toolchain, and that is fine because it
+      cannot reach a process.
+    * **Production.** Both supplied: the workspace is rendered ONCE, this worker's real toolchain is
+      measured, ``authorize_provisioning_execution`` is asked whether THIS operation may execute
+      against durable rows, and the real ``SubprocessProcessExecutor`` is constructed from the
+      answer.
+
+    The two are separate branches taking separate inputs rather than one branch with a mode,
+    specifically so that "the simulator runs without a selected worker" can never come to imply
+    "real execution runs without a selected worker". An operation whose
+    ``worker_installation_id`` is NULL refuses on the production path — inside the authority, at
+    ``execution_worker_selection_not_durable``, with no code here able to skip it.
+
+    The authority is derived HERE, at the moment of execution, from durable state. It is not passed
+    in as a claim, not serialized into Temporal, and not cached as still-valid: a caller can supply
+    only identifiers and what its own filesystem measures.
     """
     from secp_worker.provisioning.activation import (
+        authorized_executor_for_operation,
         build_process_executor,
-        grant_real_lab_activation,
     )
     from secp_worker.provisioning.opentofu import OpenTofuRunner
+    from secp_worker.provisioning.rendering import WorkspaceRenderer
     from secp_worker.provisioning.toolchain_verify import FakeToolchainVerifier
 
     settings = settings or get_settings()
@@ -796,35 +874,37 @@ def run_real_provisioning(
 
     plan, target, profile = _assert_real_gate(session, operation, manifest, settings, dispatch_mode)
 
-    # The full gate has passed: mint the worker-only activation grant. Configuration alone
-    # can never construct a real subprocess executor; in B1-A a hard seal keeps it fake.
-    grant = grant_real_lab_activation(manifest_id=manifest_id, gate_passed=True)
-
     op_ref = manifest_idempotency_key(manifest.content_hash, kind)
     operation.operation_ref = op_ref
     operation.attempts = (operation.attempts or 0) + 1
     operation.runner = "opentofu"
 
-    process_executor = (
-        executor if executor is not None else build_process_executor(settings, grant=grant)
-    )
-    # Defense-in-depth: the executor must be approved for B1-A fake-only execution. An
-    # injected real/unknown executor is refused BEFORE any secret resolution, runner
-    # construction, or process call — the subprocess seal is not the only guard.
-    if not getattr(process_executor, "b1a_fake_only", False):
-        _refuse_real(
+    # The workspace is rendered ONCE, here, and the same object is both authorized and applied.
+    # Deriving the authority from a re-render would authorize a hash computed from a different
+    # render; rendering is deterministic so the two would normally agree, and "normally agree" is
+    # exactly the gap — the authorized artifact and the executed artifact must be one object.
+    rendered_workspace = None
+    if executor is not None:
+        process_executor = executor
+    elif worker_installation_id is not None and toolchain_layout is not None:
+        rendered_workspace = _render_once(session, operation, manifest, profile)
+        process_executor = _authorized_executor(
             session,
             operation,
-            "process executor is not approved for B1-A fake-only execution; a real or "
-            "unknown executor cannot be used (the subprocess path is sealed)",
+            worker_installation_id=worker_installation_id,
+            toolchain_layout=toolchain_layout,
+            rendered_workspace_hash=rendered_workspace.content_hash,
         )
+    else:
+        # Development / simulator: runs nothing, needs no worker, cannot reach a process.
+        process_executor = build_process_executor(settings)
 
-    # Structural: LIVE execution (a real, non-fake executor) requires live_verified
-    # onboarding evidence. In B1-B-0 the executor is always fake, so simulated evidence is
-    # accepted for the fake/contract path; a would-be live executor is refused above and,
-    # even if reached, would require live_verified evidence here (ADR-014 §2).
-    require_live = not getattr(process_executor, "b1a_fake_only", False)
-    if require_live:  # pragma: no cover - unreachable in B1-B-0 (fake-only)
+    # A real (non-fake) executor requires live_verified onboarding evidence. This used to sit behind
+    # a `b1a_fake_only` refusal that made every real executor unreachable, so the branch was marked
+    # `pragma: no cover - unreachable`. The refusal is gone with the seal it belonged to, and the
+    # evidence requirement it was standing in front of is now the operative check (ADR-014 §2).
+    # A simulated-evidence target therefore cannot reach real execution.
+    if not getattr(process_executor, "b1a_fake_only", False):
         from secp_api.services.onboarding import active_onboarding_for_target
 
         assert_evidence_sufficient_for_execution(
@@ -843,16 +923,34 @@ def run_real_provisioning(
     try:
         if kind == ProvisioningOperationKind.dry_run:
             return _real_dry_run(
-                session, operation, manifest, profile, runner, op_ref, destroy=False
+                session,
+                operation,
+                manifest,
+                profile,
+                runner,
+                op_ref,
+                destroy=False,
+                workspace=rendered_workspace,
             )
         if kind == ProvisioningOperationKind.destroy_dry_run:
             return _real_dry_run(
-                session, operation, manifest, profile, runner, op_ref, destroy=True
+                session,
+                operation,
+                manifest,
+                profile,
+                runner,
+                op_ref,
+                destroy=True,
+                workspace=rendered_workspace,
             )
         if kind == ProvisioningOperationKind.apply:
-            return _real_apply(session, operation, manifest, profile, runner, op_ref)
+            return _real_apply(
+                session, operation, manifest, profile, runner, op_ref, workspace=rendered_workspace
+            )
         if kind == ProvisioningOperationKind.destroy:
-            return _real_destroy(session, operation, manifest, profile, runner, op_ref)
+            return _real_destroy(
+                session, operation, manifest, profile, runner, op_ref, workspace=rendered_workspace
+            )
         return prov_service.mark_failed(session, operation, error="unknown operation kind")
     except RunnerError:
         return prov_service.mark_failed(session, operation, error="runner error (redacted)")
@@ -894,9 +992,13 @@ def _advance_to_queued(session, operation: ProvisioningOperation, kind_label: st
         )
 
 
-def _real_dry_run(session, operation, manifest, profile, runner, op_ref, *, destroy):
+def _real_dry_run(
+    session, operation, manifest, profile, runner, op_ref, *, destroy, workspace=None
+):
     # Exact-artifact prepare; the ephemeral workspace + plan are always cleaned up.
-    prepared = runner.prepare(manifest.content, operation_id=op_ref, destroy=destroy)
+    prepared = runner.prepare(
+        manifest.content, operation_id=op_ref, destroy=destroy, workspace=workspace
+    )
     try:
         if destroy:
             authorizes = ProvisioningOperationKind.destroy
@@ -1019,11 +1121,13 @@ def _require_approved_change_set(session, operation, manifest, authorizes_kind, 
     )
 
 
-def _real_apply(session, operation, manifest, profile, runner, op_ref):
+def _real_apply(session, operation, manifest, profile, runner, op_ref, *, workspace=None):
     # Terminal idempotency is handled up-front in run_real_provisioning (before any
     # privileged setup); here the operation is guaranteed non-terminal.
     # Prepare exactly one plan; the SAME prepared plan file is applied (no re-plan).
-    prepared = runner.prepare(manifest.content, operation_id=op_ref, destroy=False)
+    prepared = runner.prepare(
+        manifest.content, operation_id=op_ref, destroy=False, workspace=workspace
+    )
     try:
         approval = _require_approved_change_set(
             session, operation, manifest, ProvisioningOperationKind.apply, prepared.change_set_hash
@@ -1058,10 +1162,12 @@ def _real_apply(session, operation, manifest, profile, runner, op_ref):
         runner.cleanup(prepared)
 
 
-def _real_destroy(session, operation, manifest, profile, runner, op_ref):
+def _real_destroy(session, operation, manifest, profile, runner, op_ref, *, workspace=None):
     # Terminal idempotency is handled up-front in run_real_provisioning; here the
     # operation is guaranteed non-terminal.
-    prepared = runner.prepare(manifest.content, operation_id=op_ref, destroy=True)
+    prepared = runner.prepare(
+        manifest.content, operation_id=op_ref, destroy=True, workspace=workspace
+    )
     try:
         approval = _require_approved_change_set(
             session,

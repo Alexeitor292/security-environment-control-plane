@@ -190,21 +190,24 @@ def _generic_executor_sealed() -> bool:
 def _activation_path_sealed() -> bool:
     """Ask the PRODUCTION factory for an executor without any durable operation authority.
 
-    Exercised with the most permissive inputs the factory still accepts: a VALID
-    ``RealLabActivationGrant`` minted through the real ``grant_real_lab_activation`` with
-    ``gate_passed=True``, and the settings a caller would use to ask for the real path. Under
-    ADR-030 neither can matter — a caller-attested boolean is not authority — and the seal holds
-    only if what comes back is the FAKE executor.
+    WHAT THIS FIELD NOW MEANS. It once meant "a grant cannot buy a real executor", exercised by
+    minting a valid ``RealLabActivationGrant`` with ``gate_passed=True`` and observing the fake come
+    back. The grant is gone — a caller-attested boolean is not authority, and leaving one in place
+    once the subprocess seal lifted would have made it the most permissive input on the path. The
+    signed evidence FIELD is preserved exactly, and its meaning follows the ADR-030 pattern: the
+    unauthorized execution path was behaviourally exercised and remained closed, rather than the
+    capability not existing.
 
-    Also exercises the authority-taking issuer with no authority, since that is the other door.
+    Two doors are exercised. ``build_process_executor`` is the development factory, and must return
+    the fake no matter what settings say — settings are severed from it, not consulted by it. And
+    ``issue_authorized_executor`` is the real door, which must refuse with nothing in hand.
 
-    Minting a grant performs no I/O and the fake executor runs nothing.
+    Neither performs I/O, and the fake executor runs nothing.
     """
     from secp_api.config import get_settings
 
     from secp_worker.provisioning.activation import (
         build_process_executor,
-        grant_real_lab_activation,
         issue_authorized_executor,
     )
     from secp_worker.provisioning.process_executor import (
@@ -212,9 +215,6 @@ def _activation_path_sealed() -> bool:
         ProcessExecutionError,
     )
 
-    grant = grant_real_lab_activation(manifest_id="seal-probe", gate_passed=True)
-    if not isinstance(build_process_executor(get_settings(), grant=grant), FakeProcessExecutor):
-        return False
     if not isinstance(build_process_executor(get_settings()), FakeProcessExecutor):
         return False
     try:
