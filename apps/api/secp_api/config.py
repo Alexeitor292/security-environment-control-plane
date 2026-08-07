@@ -265,18 +265,20 @@ class Settings(BaseSettings):
     # and only when every provisioning precondition is met (ADR-012).
     enable_fake_provisioning: bool = False
 
-    # SECP-002B-1A: real, worker-only OpenTofu provisioning path (ADR-013).
+    # Worker-only OpenTofu provisioning path (ADR-013, reopened by ADR-030).
     #
-    # ``provisioning_application_mode`` selects the path: 'simulator' (unchanged
-    # default) vs 'isolated_lab' (the ONLY mode eligible for the real path, and only
-    # behind the full activation gate). ``enable_real_provisioning`` is the explicit
-    # real-provisioning setting. ``enable_opentofu_subprocess`` ARMS the real
-    # worker-side subprocess executor — it is disabled by default, refused in production
-    # in B1-A, and is NOT armed anywhere in the B1-A slice (all tests / verification use
-    # the fake process executor).
+    # ``provisioning_application_mode`` is a ROUTING choice — 'simulator' (default) vs
+    # 'isolated_lab' — and nothing more. It selects which path a request takes; it cannot widen
+    # what that path is allowed to do, because the answer to "may this execute" comes from the
+    # durable operation authority and consults no setting.
+    #
+    # ``enable_real_provisioning`` and ``enable_opentofu_subprocess`` were REMOVED by ADR-030 §2.
+    # Both were authority-bearing: the first gated the real provisioning path and the second armed
+    # the real subprocess executor. A settings field that widens what may execute is precisely the
+    # ambient bypass §2 forbids, and while a seal made them dormant that was tolerable; retiring
+    # the seal made them live. They are deleted rather than defaulted to False, because a field
+    # that exists is a field a deployment can set. Neither is replaced by another boolean.
     provisioning_application_mode: Literal["simulator", "isolated_lab"] = "simulator"
-    enable_real_provisioning: bool = False
-    enable_opentofu_subprocess: bool = False
 
     # SECP-PR5H-B1 T2: deployment-local dev/test gate for the SEALED, claim-only enrollment
     # progression steps (bind/offer/result/verify/healthy). They are NOT a supported trusted
@@ -387,12 +389,6 @@ class Settings(BaseSettings):
             problems.append(
                 "SECP_ENABLE_FAKE_PROVISIONING must be false in production "
                 "(the fake provisioning runner is for local development/tests only)"
-            )
-        if self.enable_opentofu_subprocess:
-            problems.append(
-                "SECP_ENABLE_OPENTOFU_SUBPROCESS must be false in production "
-                "(the real OpenTofu subprocess executor is not cleared for production "
-                "in SECP-002B-1A; it is armed only for a reviewed disposable lab in B1-B)"
             )
         if self.enable_enrollment_progression:
             problems.append(

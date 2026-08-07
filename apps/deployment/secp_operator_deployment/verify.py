@@ -334,18 +334,20 @@ def classify_reason_code(code: str | None) -> dict[str, str] | None:
 
 
 def _read_seals() -> dict:
-    """Read the seal CONSTANTS and fold them to one verdict. This is not a probe, deliberately.
+    """Fold the four seals to one pass/fail verdict for prerequisite F.
 
-    ``secp_worker/safety_seal_probe.py`` derives the same region by EXERCISING it — constructing an
-    armed executor and requiring a refusal — and reports a per-seal state (``sealed`` /
-    ``unsealed`` / ``undetermined``). This function reads the flags, because prerequisite F
-    consumes a single pass/fail rung and because "is the flag set" is a genuinely different
-    question from "does the surface actually refuse".
+    This function used to read the seal CONSTANTS directly, deliberately NOT probing, so that "is
+    the flag set" and "does the surface actually refuse" stayed two independently observable
+    questions — a flag set while the path it guards still runs being exactly the disagreement worth
+    seeing.
 
-    Keep both. A flag that is set while the path it guards still runs is exactly the disagreement
-    worth being able to see, and it is only visible because these two do not share an
-    implementation. This is the one place in the seal chain where a fold to one boolean survived
-    the per-seal collapse, and it survived on purpose.
+    ADR-030 ended that for the two ``b1a_`` values by removing the flags. There is no longer a
+    second question to ask about them: the constant they compared against does not exist, and
+    inventing a replacement constant purely to preserve the disagreement would recreate the thing
+    the ADR retired. So those two now come from ``read_seals()``, which derives them by exercising
+    the unauthorized routes to the real executor. The independence that remains is real rather than
+    nominal: ``_OPERATOR_ACTIVATION_SEALED`` is still a constant read here, and it is still the case
+    that this surface and the management plane can disagree about it.
 
     The names below are LOCAL TO THIS FILE and do not match the probe's.
     ``plan_only_process_sealed`` is required to be **False** here, whereas the probe's
@@ -353,16 +355,20 @@ def _read_seals() -> dict:
     be **sealed** — same region, near-identical spelling, opposite polarity, different question. Do
     not map one onto the other.
     """
-    from secp_worker.plan_gen import process_boundary as pb
-    from secp_worker.provisioning import activation as act
-    from secp_worker.provisioning import process_executor as pe
+    from secp_management.topology import read_seals
 
     from secp_operator_deployment.runner import _OPERATOR_ACTIVATION_SEALED
 
+    # ADR-030 retired the two `_B1A_SUBPROCESS_SEALED` constants this used to read directly. The
+    # values now come from ``read_seals()``, which derives them by EXERCISING the unauthorized
+    # routes to the real executor — so this surface no longer holds a second, constant-based truth
+    # that could disagree with the management plane's. The remaining two are still constants
+    # because they have not been retired.
+    seals = read_seals()
     activation_sealed = bool(_OPERATOR_ACTIVATION_SEALED)
-    plan_only = bool(pb._PLAN_ONLY_PROCESS_SEALED)
-    b1a_act = bool(act._B1A_SUBPROCESS_SEALED)
-    b1a_exe = bool(pe._B1A_SUBPROCESS_SEALED)
+    plan_only = bool(seals.plan_only_process_sealed)
+    b1a_act = bool(seals.b1a_subprocess_sealed_activation)
+    b1a_exe = bool(seals.b1a_subprocess_sealed_executor)
     correct = activation_sealed and plan_only is False and b1a_act is True and b1a_exe is True
     return {
         "operator_activation_sealed": activation_sealed,

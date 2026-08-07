@@ -29,8 +29,11 @@ WHAT THIS DOES INSTEAD
 Every seal here is derived by EXERCISING the surface it describes with the most permissive input
 available, and observing the refusal:
 
-* the generic subprocess executor is *constructed* — with ``armed=True``, directly — and the seal
-  holds only if that raises;
+* the real subprocess executor is asked for WITHOUT the durable operation authority — including
+  with a forged authority object carrying every attribute a real one carries — and the seal holds
+  only if every route raises. (Before ADR-030 this constructed it with ``armed=True`` and required
+  a raise; construction succeeding is now expected, so that probe would have reported ``unsealed``
+  for a change that made the executor safer.);
 * the activation path is asked to build an executor while holding a VALID activation grant, and the
   seal holds only if what comes back is the fake;
 * the plan-only executor is asked for without a capability, and the gate holds only if it refuses.
@@ -122,42 +125,103 @@ def _observe(name: str, detail_sealed: str, probe) -> SealObservation:
 
 
 def _generic_executor_sealed() -> bool:
-    """Construct the real subprocess executor. The seal holds only if construction RAISES.
+    """Attempt to obtain the real executor WITHOUT the durable operation authority, three ways.
 
-    ``armed=True`` and constructed directly, which is the most permissive call available: the seal
-    is documented as non-bypassable "even with armed=True, even directly", so that is what is
-    tested. Constructing nothing is the point — a successful construction is the failure.
+    ADR-030 retired the constant this used to read and the ``armed=True`` construction it used to
+    attempt. Construction succeeding is now expected — the executor is production-capable — so a
+    probe left asserting "construction raises" would have reported ``unsealed`` for a change that
+    made the executor safer. A seal census that can report the wrong direction is worse than none.
+
+    The property that replaced it is: *the real executor cannot be obtained or used without the
+    exact durable operation authority*. This exercises the strongest unauthorized attempts the new
+    API allows, and the seal holds only if EVERY one is refused:
+
+    1. no authority at all;
+    2. ``None`` passed explicitly, through the worker's own issuing function;
+    3. a **forgery** — an object carrying exactly the attribute names a real ``AuthorizedExecution``
+       carries, with plausible values. This is the attempt that matters: an executor validating by
+       duck-typing would accept it, and only an identity check on the authority type refuses it.
+
+    Nothing is executed. Every call is expected to raise inside a constructor, before any process,
+    socket, credential or durable write exists.
+
+    The compatibility field ``b1a_subprocess_sealed_executor`` is True only when this returns True.
+    It no longer means "the capability does not exist"; it means "the unauthorized path was
+    exercised and stayed closed". Every historical True remains truthful under that reading.
     """
+    from secp_worker.provisioning.activation import issue_authorized_executor
     from secp_worker.provisioning.process_executor import (
         ProcessExecutionError,
         SubprocessProcessExecutor,
     )
 
-    try:
-        SubprocessProcessExecutor(armed=True)
-    except ProcessExecutionError:
-        return True
-    return False
+    class _ForgedAuthority:
+        """Every attribute a real authority exposes, and none of its provenance."""
+
+        operation_id = "00000000-0000-0000-0000-000000000000"
+        organization_identity = "forged"
+        target_identity = "forged"
+        manifest_id = "00000000-0000-0000-0000-000000000000"
+        kind = "apply"
+        authorization_domain = "apply"
+        change_set_hash = "sha256:" + "0" * 64
+        approval_id = "00000000-0000-0000-0000-000000000000"
+        worker_installation_id = "wk-forged"
+        toolchain_profile_id = "00000000-0000-0000-0000-000000000000"
+        rendered_workspace_hash = "sha256:" + "0" * 64
+        opentofu_executable = "/opt/secp/bin/tofu"
+        provider_mirror_identity = "forged-mirror"
+        authority_version = "secp.provisioning-execution-authority/v1"
+
+    attempts = (
+        lambda: SubprocessProcessExecutor(authority=None),
+        lambda: issue_authorized_executor(None),
+        lambda: SubprocessProcessExecutor(authority=_ForgedAuthority()),
+    )
+    for attempt in attempts:
+        try:
+            attempt()
+        except ProcessExecutionError:
+            continue
+        return False  # one unauthorized path was NOT refused
+    return True
 
 
 def _activation_path_sealed() -> bool:
-    """Ask the activation path for an executor while holding a VALID grant.
+    """Ask the PRODUCTION factory for an executor without any durable operation authority.
 
-    A grant is minted through the real ``grant_real_lab_activation`` with ``gate_passed=True`` —
-    the strongest input a caller can present. The seal holds only if what comes back is the FAKE
-    executor. Minting a grant performs no I/O and the fake executor runs nothing.
+    Exercised with the most permissive inputs the factory still accepts: a VALID
+    ``RealLabActivationGrant`` minted through the real ``grant_real_lab_activation`` with
+    ``gate_passed=True``, and the settings a caller would use to ask for the real path. Under
+    ADR-030 neither can matter — a caller-attested boolean is not authority — and the seal holds
+    only if what comes back is the FAKE executor.
+
+    Also exercises the authority-taking issuer with no authority, since that is the other door.
+
+    Minting a grant performs no I/O and the fake executor runs nothing.
     """
     from secp_api.config import get_settings
 
     from secp_worker.provisioning.activation import (
         build_process_executor,
         grant_real_lab_activation,
+        issue_authorized_executor,
     )
-    from secp_worker.provisioning.process_executor import FakeProcessExecutor
+    from secp_worker.provisioning.process_executor import (
+        FakeProcessExecutor,
+        ProcessExecutionError,
+    )
 
     grant = grant_real_lab_activation(manifest_id="seal-probe", gate_passed=True)
-    executor = build_process_executor(get_settings(), grant=grant)
-    return isinstance(executor, FakeProcessExecutor)
+    if not isinstance(build_process_executor(get_settings(), grant=grant), FakeProcessExecutor):
+        return False
+    if not isinstance(build_process_executor(get_settings()), FakeProcessExecutor):
+        return False
+    try:
+        issue_authorized_executor(None)
+    except ProcessExecutionError:
+        return True
+    return False
 
 
 def _plan_only_gate_holds() -> bool:
@@ -221,12 +285,15 @@ def derive_seals() -> tuple[SealObservation, ...]:
     return (
         _observe(
             "generic_executor_subprocess_sealed",
-            "SubprocessProcessExecutor(armed=True) was constructed directly and refused",
+            "every unauthorized route to the real executor was exercised and refused",
             _generic_executor_sealed,
         ),
         _observe(
             "generic_activation_subprocess_sealed",
-            "build_process_executor returned the fake executor while holding a valid grant",
+            (
+                "the production factory returned the fake while holding a valid grant, and "
+                "the authority-taking issuer refused without authority"
+            ),
             _activation_path_sealed,
         ),
         _observe(

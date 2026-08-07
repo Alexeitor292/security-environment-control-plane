@@ -82,8 +82,17 @@ def test_eligibility_path_has_no_process_or_mutation_tokens():
 def test_both_b1a_subprocess_seals_remain_true():
     from secp_worker.provisioning import activation, process_executor
 
-    assert process_executor._B1A_SUBPROCESS_SEALED is True
-    assert activation._B1A_SUBPROCESS_SEALED is True
+    # ADR-030 retired both `_B1A_SUBPROCESS_SEALED` copies. Asserted as an ABSENCE plus the
+    # behaviour that replaced them: an absence alone would also be satisfied by someone deleting
+    # the constants and wiring the executor open.
+    assert not hasattr(process_executor, "_B1A_SUBPROCESS_SEALED")
+    assert not hasattr(activation, "_B1A_SUBPROCESS_SEALED")
+    from secp_worker.safety_seal_probe import SealState as _ProbeSealState
+    from secp_worker.safety_seal_probe import derive_seals
+
+    observed = {o.name: o for o in derive_seals()}
+    for seal in ("generic_executor_subprocess_sealed", "generic_activation_subprocess_sealed"):
+        assert observed[seal].state is _ProbeSealState.sealed, seal
 
 
 def test_worker_eligibility_seam_is_sealed_by_default():

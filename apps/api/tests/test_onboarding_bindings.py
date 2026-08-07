@@ -31,7 +31,6 @@ from tests.conftest import VALID_ONBOARDING_BOUNDARY, VALID_PROVISIONING_SCOPE  
 REAL_ON = Settings(
     app_env="test",
     provisioning_application_mode="isolated_lab",
-    enable_real_provisioning=True,
     workflow_dispatch_mode="temporal",
 )
 

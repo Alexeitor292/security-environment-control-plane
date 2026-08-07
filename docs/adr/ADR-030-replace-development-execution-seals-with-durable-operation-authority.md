@@ -205,10 +205,124 @@ an expired observation alive indefinitely. `unverifiable` refuses distinctly fro
 different operator actions, and reporting the second as the first sends someone to fix a target that
 may be fine. The freshness bound is a property of the contract, not a caller's argument.
 
-**What is not yet true.** No production path calls `authorize_provisioning_execution`; there is no
-provisioning enqueue endpoint, and `advance` has no callers. The derivation and its gate exist and
-are tested; the executor that would consult them does not. Nothing in this section should be read
-as evidence that a real operation can run.
+### The executable surface (§3), and the bootstrap-evidence compatibility ruling
+
+`provisioning/command_grammar.py` is the only place an OpenTofu argv is built. `OpenTofuRunner`'s
+four argv builders are call sites into it rather than a second copy, and a test keyed on argv
+construction — not on a name — proves the engine contains no list literal holding an OpenTofu verb.
+§3 asks for "a derived grammar rather than a hand-maintained list, so a reviewed operation and an
+executable command are the same fact"; a shared builder gives that by construction, where an
+allowlist would be a second artifact free to drift open.
+
+`SubprocessProcessExecutor` is production-capable. `_B1A_SUBPROCESS_SEALED` is gone from **both**
+modules that defined it, `armed=` is gone, and no alias remains. Two independent things close it:
+
+1. **it cannot be constructed without the exact durable operation authority.** The constructor takes
+   an `AuthorizedExecution` and checks it with `isinstance`, so an object carrying every attribute a
+   real one carries is still refused. There is no settings field, environment variable, grant or
+   flag that substitutes;
+2. **it cannot run a command the grammar could not produce.** The pinned executable and provider
+   mirror come from that authority — never from the spec — and every spec is rebuilt from the
+   grammar and compared byte for byte. The working directory must be a workspace under the worker's
+   own root, and the plan path is derived from it. Because the argv is *rebuilt* rather than
+   inspected, `shell=True`, a shell string, a `/bin/sh -c` payload, argv from a request, a
+   caller-supplied environment or working directory and a caller-selected executable are impossible
+   rather than checked for.
+
+#### The ambient gates are gone, not defaulted off
+
+`settings.enable_opentofu_subprocess` / `SECP_ENABLE_OPENTOFU_SUBPROCESS` and
+`settings.enable_real_provisioning` / `SECP_ENABLE_REAL_PROVISIONING` are **removed from `Settings`**.
+Both were authority-bearing: the first armed the real executor, the second gated the real
+provisioning path in `run_real_provisioning`. While a seal made them dormant that was tolerable;
+retiring the seal made them live §2 violations. Neither is replaced by another boolean, and a field
+that exists is a field a deployment can set — so they are deleted rather than pinned False. A stale
+`SECP_ENABLE_OPENTOFU_SUBPROCESS=true` left in an environment is now inert.
+
+The production refusal for the first went with the field, and that is strictly stronger than what it
+replaced: a validator that rejects a value *in production* still leaves it settable everywhere else,
+including the reviewed disposable lab it was always going to be armed in.
+
+`RealLabActivationGrant` and `grant_real_lab_activation(gate_passed=True)` survive as symbols — the
+readiness-boundary guards name them as forbidden call targets — but are **severed** from real
+execution: `build_process_executor` accepts both parameters and cannot let either influence its
+result. A caller-attested `gate_passed` boolean is not authority and cannot stand in for one.
+`provisioning_application_mode` remains as a routing choice only; it selects which path a request
+takes and cannot widen what that path may do, because the authority derivation consults no setting.
+
+#### Bootstrap-evidence compatibility: retire the constant, preserve the schema
+
+Retiring `_B1A_SUBPROCESS_SEALED` reached further than the worker. `secp_management.topology.
+read_seals()` read both copies into `SealState`, and its two fields
+`b1a_subprocess_sealed_activation` and `b1a_subprocess_sealed_executor` are **required members of
+`BootstrapEvidence`** — a strict, frozen, `extra='forbid'` document whose `canonical()` is a full
+`model_dump()`, so both booleans sit inside `digest()`, which carries an independently verified
+Ed25519 attestation. Deleting or renaming them would invalidate the digest of every evidence
+document already issued, with no migration path for documents already signed and distributed.
+
+**Ruling (Juan, 2026-08-07): the constants are retired; the signed schema is not.** All four field
+names, their types and the canonical field set are preserved exactly. What changes is where the two
+`b1a_` values come from and what they assert:
+
+```text
+old True:  the capability is globally sealed, therefore unauthorized execution is impossible
+new True:  the production capability may exist, but the unauthorized path was behaviourally
+           exercised and stayed closed
+```
+
+The transition is **monotonic**: every historical `True` remains truthful under the new reading,
+because a capability that could not exist could not be reached without authority either. That is
+precisely what allows the field set to stay fixed while the constants underneath it go, and it is
+why this is a reinterpretation that needs documenting rather than a migration. A future
+evidence-schema version may rename these concepts cleanly; that is explicitly not an M1 change.
+
+The values are now derived by the existing behavioural probe, `secp_worker.safety_seal_probe`, which
+already exercised surfaces rather than trusting constants. Its two B1A probes were adapted rather
+than replaced:
+
+- the executor probe attempts the real executor with no authority, with `None` through the worker's
+  issuing function, and with a **forgery** carrying every attribute of a real `AuthorizedExecution`.
+  The field is `True` only if all three are refused. (It previously constructed with `armed=True`
+  and required a raise — left alone it would have reported `unsealed` for a change that made the
+  executor safer, and a census that can report the wrong direction is worse than none);
+- the activation probe asks the production factory for an executor while holding a valid grant, and
+  asks the authority-taking issuer for one with no authority. The field is `True` only if the first
+  returns the fake and the second refuses.
+
+`SealState.undetermined` is never `True`: a derivation that cannot be performed is unknown, and
+unknown is not permission. `read_seals()` treats an import failure the same way. Nothing in either
+probe spawns OpenTofu, contacts a provider, opens a socket, resolves a credential or mutates durable
+state — every call is expected to refuse inside a constructor.
+
+`secp_operator_deployment.verify` no longer reads the constants either, so no second, constant-based
+truth survives anywhere.
+
+**These booleans are not execution authority.** They exist for bootstrap-evidence compatibility,
+status re-observation and the historical safety record. Real execution authority comes only from the
+durable operation derivation, and nothing may use a `SealState` field to authorize execution.
+
+`apps/management/tests/test_bootstrap_evidence_adr030_compatibility.py` holds the regression proofs
+against `fixtures/pre_adr030_bootstrap_evidence.json`, frozen from the tree **before** the
+retirement: the canonical bytes are byte-identical, `digest()` and `bootstrap_binding_digest()` are
+unchanged, the detached Ed25519 attestation still verifies, the document still parses, today's
+behavioural re-observation reproduces the recorded values, and removing, renaming or flipping any of
+the four fields is caught — the last through a changed digest and a failed signature, per field,
+since a field accidentally excluded from `canonical()` would otherwise leave the digest stable while
+its value moved.
+
+#### The operator seal will hit this exact conflict
+
+`operator_activation_sealed` is the third of the four evidence fields and `_OPERATOR_ACTIVATION_
+SEALED` is still a constant. When ADR-030 retires it, the same rule applies and must not be
+rediscovered as a blocker: **preserve the evidence field, retire the constant, derive the
+unauthorized-path closure behaviourally.** Do not change the signed field set. `read_seals()` is
+written so that swapping that one value from a constant to a probe observation is a local change.
+
+**What is still not true.** No production path calls `authorize_provisioning_execution`; there is no
+provisioning enqueue endpoint; the dispatchability gate is not installed in `advance` (above); and
+`run_real_provisioning` still refuses any executor not marked fake-only, so nothing constructs a
+real executor in any shipped path. Nothing in this section should be read as evidence that a real
+operation can run, and no live infrastructure has been contacted.
 
 ## Consequences
 

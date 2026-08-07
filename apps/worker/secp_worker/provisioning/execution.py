@@ -414,14 +414,15 @@ def _assert_real_gate(
             "isolated-lab application mode is not enabled "
             "(set SECP_PROVISIONING_APPLICATION_MODE=isolated_lab)",
         )
-    # 2. Explicit real-provisioning setting (never in production in B1-A).
-    if settings.is_production or not settings.enable_real_provisioning:
-        _refuse_real(
-            session,
-            operation,
-            "real provisioning is disabled; set SECP_ENABLE_REAL_PROVISIONING=true "
-            "(reviewed disposable lab only) — real provisioning is refused by default",
-        )
+    # 2. RETIRED by ADR-030 §2. This checked ``settings.enable_real_provisioning``, a settings field
+    #    whose value widened what may execute — the exact shape §2 forbids. It is not replaced by
+    #    another setting or another boolean: whether this operation may execute is answered by
+    #    ``authorize_provisioning_execution`` against durable rows, and a deployment-wide flag
+    #    cannot express "this operation, this worker, this approved change set, now".
+    #
+    #    The production check went with it for the same reason. "Not in production" is a property
+    #    of the process, and a process-wide property is precisely what must not be able to permit
+    #    or forbid a specific authorized operation.
     # 3. Temporal/durable worker path only; inline execution is refused.
     if dispatch_mode != "temporal":
         _refuse_real(

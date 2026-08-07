@@ -832,9 +832,21 @@ def test_ready_requires_every_gate_and_still_creates_no_runner_executor_or_grant
 def test_both_b1a_subprocess_seals_remain_exactly_true():
     from secp_worker.provisioning import activation, process_executor
 
-    assert activation._B1A_SUBPROCESS_SEALED is True
-    assert process_executor._B1A_SUBPROCESS_SEALED is True
+    # ADR-030 retired both `_B1A_SUBPROCESS_SEALED` copies. Asserted as an ABSENCE plus the
+    # behaviour that replaced them: an absence alone would also be satisfied by someone deleting
+    # the constants and wiring the executor open.
+    assert not hasattr(process_executor, "_B1A_SUBPROCESS_SEALED")
+    assert not hasattr(activation, "_B1A_SUBPROCESS_SEALED")
+    from secp_worker.safety_seal_probe import SealState as _ProbeSealState
+    from secp_worker.safety_seal_probe import derive_seals
+
+    observed = {o.name: o for o in derive_seals()}
+    for seal in ("generic_executor_subprocess_sealed", "generic_activation_subprocess_sealed"):
+        assert observed[seal].state is _ProbeSealState.sealed, seal
     for module in (activation, process_executor):
         source = pathlib.Path(module.__file__).read_text(encoding="utf-8")
-        assert source.count("_B1A_SUBPROCESS_SEALED = True") == 1
+        # Inverted by ADR-030: the scan required exactly one `= True`; it now requires the
+        # assignment to be absent entirely, in either polarity. Reintroducing the constant is the
+        # regression, not setting it to False.
+        assert "_B1A_SUBPROCESS_SEALED = True" not in source
         assert "_B1A_SUBPROCESS_SEALED = False" not in source

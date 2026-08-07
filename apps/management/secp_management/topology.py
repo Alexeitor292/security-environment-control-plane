@@ -100,7 +100,31 @@ API_RUNTIME_GID = _RUNTIME_GID
 
 @dataclass(frozen=True)
 class SealState:
-    """The four reviewed safety seals, observed fail-closed from the actual code constants."""
+    """The four reviewed safety seals, observed fail-closed.
+
+    THE FIELD NAMES ARE A COMPATIBILITY SURFACE, NOT A DESCRIPTION. All four are required members
+    of the signed :class:`~secp_management.evidence.BootstrapEvidence` document, whose
+    ``canonical()`` is a full ``model_dump()`` — so each name sits inside ``digest()``, which
+    carries an independently verified Ed25519 attestation. Renaming one, removing one, or making
+    one optional would change the canonical field set and invalidate the digest of every evidence
+    document already issued. They are therefore fixed. A future evidence-schema version may rename
+    the concepts cleanly; that is not an M1 change.
+
+    WHAT THE TWO ``b1a_`` FIELDS MEAN NOW. ADR-030 retired the `_B1A_SUBPROCESS_SEALED` constants
+    they used to read. Their meaning moved with the architecture:
+
+    ``old True``  the capability is globally sealed, therefore unauthorized execution is impossible
+    ``new True``  the production capability may exist, but the unauthorized path was BEHAVIOURALLY
+                  exercised and stayed closed
+
+    The transition is monotonic: every historical ``True`` remains truthful under the new reading,
+    because a capability that could not exist could not be reached without authority either. That
+    is what lets the field set stay fixed while the constants underneath it go.
+
+    These booleans are **not execution authority** and must never be used as such. They exist for
+    bootstrap-evidence compatibility, status re-observation, and the historical safety record. Real
+    execution authority comes only from the ADR-030 durable operation derivation.
+    """
 
     operator_activation_sealed: bool
     plan_only_process_sealed: bool
@@ -118,15 +142,44 @@ class SealState:
 
 
 def read_seals() -> SealState:
-    """Read the four seals directly from the reviewed code constants (never a config/env)."""
+    """Observe the four seals fail-closed. Never a config, never an environment variable.
+
+    The two ``b1a_`` values are DERIVED BY EXERCISE, from ``secp_worker.safety_seal_probe``, because
+    ADR-030 retired the constants they used to read. That is not merely a substitution: a constant
+    was always a claim ABOUT code elsewhere, and deleting the guard it described left every seal
+    still reporting ``True``. The probe attempts the unauthorized routes to the real executor —
+    including a forged authority object — and reports what actually happened.
+
+    Fail-closed is explicit: the probe distinguishes ``sealed`` from ``undetermined``, and only
+    ``sealed`` becomes ``True`` here. A derivation that could not be performed is unknown, and
+    unknown is not permission. An import failure is likewise ``False`` rather than an exception,
+    because a bootstrap that cannot observe a seal must record that it could not — not refuse to
+    produce evidence, and not claim the seal held.
+
+    The remaining two values still come from constants, and deliberately: ``_OPERATOR_ACTIVATION_
+    SEALED`` and ``_PLAN_ONLY_PROCESS_SEALED`` have not been retired. When the operator one is,
+    the same rule applies to it — preserve the evidence field, retire the constant, derive the
+    closure behaviourally — and it should be changed here rather than rediscovered as a conflict.
+    """
     from secp_operator_deployment.runner import _OPERATOR_ACTIVATION_SEALED
     from secp_worker.plan_gen import process_boundary as pb
-    from secp_worker.provisioning import activation as act
-    from secp_worker.provisioning import process_executor as pe
+
+    # NOTE the name collision: the probe's ``SealState`` is a three-valued ENUM
+    # (sealed/unsealed/undetermined) while this module's is the four-boolean RECORD. Same word, two
+    # concepts. Rather than import the enum and risk the two being confused at a glance, the probe's
+    # state is compared by VALUE — ``"sealed"`` is a member of a ``str`` enum, so the comparison is
+    # exact and carries the meaning at the point of use.
+    closed: set[str] = set()
+    try:
+        from secp_worker.safety_seal_probe import derive_seals
+
+        closed = {item.name for item in derive_seals() if item.state.value == "sealed"}
+    except Exception:  # noqa: BLE001 - an unobservable seal is False, never True
+        closed = set()
 
     return SealState(
         operator_activation_sealed=bool(_OPERATOR_ACTIVATION_SEALED),
         plan_only_process_sealed=bool(pb._PLAN_ONLY_PROCESS_SEALED),
-        b1a_subprocess_sealed_activation=bool(act._B1A_SUBPROCESS_SEALED),
-        b1a_subprocess_sealed_executor=bool(pe._B1A_SUBPROCESS_SEALED),
+        b1a_subprocess_sealed_activation="generic_activation_subprocess_sealed" in closed,
+        b1a_subprocess_sealed_executor="generic_executor_subprocess_sealed" in closed,
     )

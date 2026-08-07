@@ -7,9 +7,10 @@ Real provisioning is disabled by default. The full activation gate is enforced i
   produced **only after** the complete real-lab gate succeeds. Configuration alone
   (``SECP_ENABLE_OPENTOFU_SUBPROCESS=true``) can never construct a real subprocess
   executor.
-- ``build_process_executor`` — returns a ``FakeProcessExecutor`` unless a valid grant is
-  present AND the real subprocess is unsealed. **In B1-A a hard seal keeps it Fake in all
-  cases**, so no real process can ever run.
+- ``build_process_executor`` — returns a ``FakeProcessExecutor``, always. It no longer consults a
+  settings flag or a grant; see the function for why that is severance rather than a check.
+- ``issue_authorized_executor`` — the ONLY way to obtain a real executor, and it takes the durable
+  operation authority rather than any form of permission a caller can assert.
 - just-in-time secret env building for a would-be lab apply.
 """
 
@@ -22,13 +23,10 @@ from secp_api.config import Settings
 
 from secp_worker.provisioning.process_executor import (
     FakeProcessExecutor,
+    ProcessExecutionError,
     ProcessExecutor,
     SubprocessProcessExecutor,
 )
-
-# HARD B1-A SEAL: the real subprocess executor is never constructed in this slice, even
-# with a valid grant + config. Unsealing is a reviewed disposable-lab (B1-B) change.
-_B1A_SUBPROCESS_SEALED = True
 
 
 @dataclass(frozen=True)
@@ -55,29 +53,44 @@ def grant_real_lab_activation(*, manifest_id: object, gate_passed: bool) -> Real
     return RealLabActivationGrant(manifest_id=str(manifest_id), _nonce=secrets.token_hex(8))
 
 
-def _real_subprocess_allowed(settings: Settings, grant: RealLabActivationGrant | None) -> bool:
-    if _B1A_SUBPROCESS_SEALED:
-        return False  # B1-A: never construct a real subprocess executor
-    return (  # pragma: no cover - B1-B only
-        isinstance(grant, RealLabActivationGrant)
-        and grant.is_valid()
-        and settings.enable_opentofu_subprocess
-        and not settings.is_production
-    )
-
-
 def build_process_executor(
     settings: Settings, *, grant: RealLabActivationGrant | None = None
 ) -> ProcessExecutor:
-    """Return the process executor allowed by policy.
+    """The settings-driven factory. Returns the fake, and structurally cannot return anything else.
 
-    A configuration flag alone can NOT construct a real subprocess executor: a valid
-    ``RealLabActivationGrant`` (produced only after the full gate) is required, and in
-    B1-A a hard seal keeps this a ``FakeProcessExecutor`` regardless.
+    This used to read ``settings.enable_opentofu_subprocess`` together with a grant, held shut by
+    `_B1A_SUBPROCESS_SEALED`. ADR-030 retired that seal, and retiring it is exactly what made the
+    rest unacceptable rather than merely dormant: a configuration field or a caller-attested
+    ``gate_passed`` boolean that widens what may execute is the ambient bypass §2 forbids, and both
+    would have gone live the moment the seal went.
+
+    So the branch is deleted rather than re-gated, and the two parameters are now **severed** from
+    real execution: they are accepted for call-site compatibility and cannot influence the result.
+    A real executor requires the durable operation authority, which this function is never handed
+    and must never synthesize — see :func:`issue_authorized_executor`.
     """
-    if _real_subprocess_allowed(settings, grant):
-        return SubprocessProcessExecutor(armed=True)  # pragma: no cover - B1-B only
+    del settings, grant
     return FakeProcessExecutor()
+
+
+def issue_authorized_executor(authority: object) -> SubprocessProcessExecutor:
+    """The ONLY way to obtain a real process executor.
+
+    Takes the ``AuthorizedExecution`` that ``authorize_provisioning_execution`` returns after every
+    ADR-030 condition has held against durable rows. There is deliberately no ``settings``
+    parameter, no grant, and no flag: the argument list is the whole authorization surface, and
+    nothing in it is a value a caller can assert about itself.
+
+    The refusal for a missing or forged authority comes from the executor's own constructor rather
+    than from a check here, so a caller that bypasses this function and constructs the executor
+    directly is refused identically. This function exists to give the worker one obvious door, not
+    to be the lock.
+    """
+    if authority is None:
+        raise ProcessExecutionError(
+            "a real process executor requires the durable operation authority; none was supplied"
+        )
+    return SubprocessProcessExecutor(authority=authority)
 
 
 def build_lab_secret_env(config: dict, token_value: str) -> dict[str, str]:

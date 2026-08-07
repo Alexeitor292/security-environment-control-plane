@@ -29,6 +29,7 @@ import shutil
 from dataclasses import dataclass, field
 
 from secp_worker.provisioning.change_set import planned_resources, summarize
+from secp_worker.provisioning.command_grammar import OpenTofuStep, build_argv
 from secp_worker.provisioning.identifiers import (
     IdentifierError,
     validate_executable,
@@ -152,47 +153,35 @@ class OpenTofuRunner:
 
     # -- argv builders (pinned executable, offline, no local state) ------------
 
+    # Every one of these delegates to ``command_grammar``. They are NOT a second builder kept in
+    # step with it -- they are the call sites. The executor re-derives the same argv from the same
+    # function, so "a reviewed operation" and "an executable command" are one fact rather than two
+    # that have to agree (ADR-030 §3).
+
+    def _argv(self, step: OpenTofuStep, workdir: str) -> list[str]:
+        return build_argv(
+            step,
+            executable=self._executable,
+            workdir=workdir,
+            mirror_identity=str(self._profile["provider_mirror"]["identity"]),
+        )
+
     def _offline_init_argv(self, workdir: str) -> list[str]:
-        mirror = self._profile["provider_mirror"]["identity"]
-        return [
-            self._executable,
-            f"-chdir={workdir}",
-            "init",
-            "-input=false",
-            "-no-color",
-            "-get=false",
-            "-upgrade=false",
-            "-lockfile=readonly",
-            f"-plugin-dir=/opt/secp/provider-mirror/{mirror}",
-        ]
+        return self._argv(OpenTofuStep.init, workdir)
 
     def _plan_argv(self, workdir: str, plan_file: str, *, destroy: bool) -> list[str]:
-        argv = [
-            self._executable,
-            f"-chdir={workdir}",
-            "plan",
-            "-input=false",
-            "-no-color",
-            "-lock=true",
-            f"-out={plan_file}",
-        ]
-        if destroy:
-            argv.append("-destroy")
-        return argv
+        # ``plan_file`` is accepted for call-site compatibility and deliberately not used: the
+        # grammar derives it from ``workdir``, so there is no caller-controlled path in the argv.
+        del plan_file
+        return self._argv(OpenTofuStep.destroy_plan if destroy else OpenTofuStep.plan, workdir)
 
     def _show_argv(self, workdir: str, plan_file: str) -> list[str]:
-        return [self._executable, f"-chdir={workdir}", "show", "-json", plan_file]
+        del plan_file
+        return self._argv(OpenTofuStep.show, workdir)
 
     def _apply_argv(self, workdir: str, plan_file: str) -> list[str]:
-        return [
-            self._executable,
-            f"-chdir={workdir}",
-            "apply",
-            "-input=false",
-            "-no-color",
-            "-lock=true",
-            plan_file,
-        ]
+        del plan_file
+        return self._argv(OpenTofuStep.apply, workdir)
 
     def _spec(self, argv: list[str], workdir: str, label: str) -> ProcessSpec:
         from secp_worker.provisioning.process_executor import build_process_env

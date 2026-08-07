@@ -1,0 +1,117 @@
+{
+  "_comment": "Frozen from the tree BEFORE the ADR-030 execution-seal retirement. Regenerating this file would defeat its purpose: it exists to prove the transition changed neither the canonical bytes nor the digest nor the attestation of evidence issued before it.",
+  "attestation": {
+    "algorithm": "ed25519",
+    "key_id": "fixture-ed25519-1",
+    "public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+    "signature_hex": "34bce4949206b492990e506d2ddc9b8cd242cdd26d427bfab696e2df1cf3922e34d68ab33cf45e40733ac42cb386509e8d27a991ac1bd6aeb4dcc5095b364401"
+  },
+  "bootstrap_binding_digest": "sha256:73c46e6e6943504d844f1df9f71c22a16bfbdcccb013456f312a4cc2e40b6dd4",
+  "canonical": {
+    "b1a_subprocess_sealed_activation": true,
+    "b1a_subprocess_sealed_executor": true,
+    "bootstrap_contract_version": "2b-3c",
+    "commissioning_evidence_digest": null,
+    "component_image_identity": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "config_identity": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+    "container_identities": [
+      "secp-worker-ordinary"
+    ],
+    "deployment_package_aggregate": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+    "expected_components": [
+      "api",
+      "worker"
+    ],
+    "external_contacts_performed": false,
+    "health_command_identity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "image_digests": [
+      "sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    ],
+    "implementation_aggregate": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "installation_id": "wk-fixture-0001",
+    "mode": "install",
+    "object_records": [
+      {
+        "binding": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "classification": "created",
+        "content_sha256": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "gid": 0,
+        "kind": "identity",
+        "mode": 384,
+        "role": "worker",
+        "uid": 0
+      },
+      {
+        "binding": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "classification": "created",
+        "content_sha256": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "gid": 0,
+        "kind": "release_manifest",
+        "mode": 384,
+        "role": "worker",
+        "uid": 0
+      },
+      {
+        "binding": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "classification": "created",
+        "content_sha256": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "gid": 0,
+        "kind": "release_signature",
+        "mode": 384,
+        "role": "worker",
+        "uid": 0
+      },
+      {
+        "binding": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "classification": "created",
+        "content_sha256": null,
+        "gid": 0,
+        "kind": "evidence",
+        "mode": 384,
+        "role": "worker",
+        "uid": 0
+      },
+      {
+        "binding": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "classification": "created",
+        "content_sha256": "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "gid": 0,
+        "kind": "evidence_attestation",
+        "mode": 384,
+        "role": "worker",
+        "uid": 0
+      }
+    ],
+    "opentofu_executed": false,
+    "operator_activation_sealed": true,
+    "operator_task_queue": "secp-operator",
+    "ordinary_task_queue": "secp-ordinary",
+    "parent_sha": "2222222222222222222222222222222222222222",
+    "path_bindings": [
+      "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+    ],
+    "plan_only_process_sealed": false,
+    "plane": "management",
+    "proxmox_contacted": false,
+    "release_aggregate_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "role": "worker",
+    "run_plan_generation_called": false,
+    "runtime_gid": 10001,
+    "runtime_uid": 10001,
+    "service_identities": [
+      "secp-operator.service"
+    ],
+    "signing_anchor_id": "anchor-fixture-1",
+    "source_sha": "0000000000000000000000000000000000000000",
+    "source_tree_sha": "1111111111111111111111111111111111111111",
+    "transaction_timestamp": "2026-08-07T00:00:00Z",
+    "unit_identity": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+    "wheel_digests": [
+      "sha256:8888888888888888888888888888888888888888888888888888888888888888"
+    ],
+    "workflows_submitted": false
+  },
+  "canonical_bytes_len": 3240,
+  "canonical_bytes_sha256_hex": "92bcfcb070fd4384987741542c1cc91dc8ff2f773625857ec5e73467b3a6330a",
+  "digest": "sha256:22f8d0e64739ad7e04bda595c8741218b774300fcec29e203ee66145a5f00540"
+}

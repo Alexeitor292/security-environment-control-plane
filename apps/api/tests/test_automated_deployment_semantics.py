@@ -14,7 +14,6 @@ from secp_worker.provisioning.execution import run_real_provisioning
 REAL_ON = Settings(
     app_env="test",
     provisioning_application_mode="isolated_lab",
-    enable_real_provisioning=True,
     workflow_dispatch_mode="temporal",
 )
 
