@@ -167,5 +167,14 @@ def test_all_seals_remain_as_required():
 
     assert runner._OPERATOR_ACTIVATION_SEALED is True  # PR5D operator-activation seal
     assert pb._PLAN_ONLY_PROCESS_SEALED is False  # plan-only seal unchanged
-    assert act._B1A_SUBPROCESS_SEALED is True  # both B1-A subprocess seals unchanged
-    assert pe._B1A_SUBPROCESS_SEALED is True
+    # ADR-030 retired both `_B1A_SUBPROCESS_SEALED` copies. Asserted as an ABSENCE plus the
+    # behaviour that replaced them: an absence alone would also be satisfied by someone deleting
+    # the constants and wiring the executor open.
+    assert not hasattr(pe, "_B1A_SUBPROCESS_SEALED")
+    assert not hasattr(act, "_B1A_SUBPROCESS_SEALED")
+    from secp_worker.safety_seal_probe import SealState as _ProbeSealState
+    from secp_worker.safety_seal_probe import derive_seals
+
+    observed = {o.name: o for o in derive_seals()}
+    for seal in ("generic_executor_subprocess_sealed", "generic_activation_subprocess_sealed"):
+        assert observed[seal].state is _ProbeSealState.sealed, seal

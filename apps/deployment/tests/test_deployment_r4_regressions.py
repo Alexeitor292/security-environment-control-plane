@@ -59,8 +59,17 @@ def test_all_four_seals_remain_exact():
 
     assert _OPERATOR_ACTIVATION_SEALED is True
     assert pb._PLAN_ONLY_PROCESS_SEALED is False
-    assert act._B1A_SUBPROCESS_SEALED is True
-    assert pe._B1A_SUBPROCESS_SEALED is True
+    # ADR-030 retired both `_B1A_SUBPROCESS_SEALED` copies. Asserted as an ABSENCE plus the
+    # behaviour that replaced them: an absence alone would also be satisfied by someone deleting
+    # the constants and wiring the executor open.
+    assert not hasattr(pe, "_B1A_SUBPROCESS_SEALED")
+    assert not hasattr(act, "_B1A_SUBPROCESS_SEALED")
+    from secp_worker.safety_seal_probe import SealState as _ProbeSealState
+    from secp_worker.safety_seal_probe import derive_seals
+
+    observed = {o.name: o for o in derive_seals()}
+    for seal in ("generic_executor_subprocess_sealed", "generic_activation_subprocess_sealed"):
+        assert observed[seal].state is _ProbeSealState.sealed, seal
 
 
 def test_queues_are_distinct_and_exact():

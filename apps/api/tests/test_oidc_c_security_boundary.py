@@ -77,16 +77,23 @@ def test_no_dev_fallback_or_provisioning_activation_in_production():
     s = _prod()
     assert s.dev_auth_enabled is False
     assert s.enable_fake_provisioning is False
-    assert s.enable_real_provisioning is False
-    assert s.enable_opentofu_subprocess is False
-    # Arming the dev fallback, the fake runner, or the OpenTofu subprocess in production is refused
-    # at construction. (The real-provisioning path is additionally sealed by a code constant
-    # regardless of the flag; the reference env pins it false — asserted in the reference-env test.)
-    for override in (
-        {"auth_dev_mode": True},
-        {"enable_fake_provisioning": True},
-        {"enable_opentofu_subprocess": True},
-    ):
+    # ADR-030 §2 REMOVED ``enable_real_provisioning`` and ``enable_opentofu_subprocess`` rather
+    # than pinning them False in production. A field that exists is a field a deployment can set,
+    # and both widened what may execute. Asserting their ABSENCE is strictly stronger than
+    # asserting their value: a removed field cannot be set anywhere, in any environment, and
+    # ``extra='forbid'`` turns an attempt into a construction error rather than a silent no-op.
+    assert not hasattr(s, "enable_real_provisioning")
+    assert not hasattr(s, "enable_opentofu_subprocess")
+    # And passing them anyway cannot resurrect them. ``Settings`` does not forbid extra keys, so a
+    # stale ``SECP_ENABLE_OPENTOFU_SUBPROCESS=true`` left in a deployment's environment is ACCEPTED
+    # and ignored rather than rejected — which is the safe direction here and worth pinning,
+    # because the field being absent is exactly what makes the stale value inert. If ``Settings``
+    # ever gains ``extra='forbid'``, this becomes a construction error and this assertion is what
+    # will say so.
+    for removed in ("enable_real_provisioning", "enable_opentofu_subprocess"):
+        assert not hasattr(_prod(**{removed: True}), removed), removed
+    # Arming the dev fallback or the fake runner in production is still refused at construction.
+    for override in ({"auth_dev_mode": True}, {"enable_fake_provisioning": True}):
         with pytest.raises(ValidationError):
             _prod(**override)
 

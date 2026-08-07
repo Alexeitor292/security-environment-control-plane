@@ -437,26 +437,41 @@ def test_both_b1a_subprocess_seals_remain_exactly_and_effectively_true():
     from secp_worker.provisioning import activation as act
     from secp_worker.provisioning import process_executor as pe
 
-    assert pe._B1A_SUBPROCESS_SEALED is True
-    assert act._B1A_SUBPROCESS_SEALED is True
+    # ADR-030 retired both `_B1A_SUBPROCESS_SEALED` copies. Asserted as an ABSENCE plus the
+    # behaviour that replaced them: an absence alone would also be satisfied by someone deleting
+    # the constants and wiring the executor open.
+    assert not hasattr(pe, "_B1A_SUBPROCESS_SEALED")
+    assert not hasattr(act, "_B1A_SUBPROCESS_SEALED")
+    from secp_worker.safety_seal_probe import SealState as _ProbeSealState
+    from secp_worker.safety_seal_probe import derive_seals
+
+    observed = {o.name: o for o in derive_seals()}
+    for seal in ("generic_executor_subprocess_sealed", "generic_activation_subprocess_sealed"):
+        assert observed[seal].state is _ProbeSealState.sealed, seal
 
     for module in (pe, act):
         text = pathlib.Path(module.__file__).read_text(encoding="utf-8")
-        assigns = re.findall(r"(?m)^_B1A_SUBPROCESS_SEALED\s*=.*$", text)
-        assert len(assigns) == 1
-        assert assigns[0].split("=", 1)[1].strip() == "True"
+        # Inverted: the scan used to require EXACTLY ONE `_B1A_SUBPROCESS_SEALED = True`. It now
+        # requires NONE. A constant reintroduced under the old name -- or a new one differing only
+        # in its value -- is what this catches, and it catches it in the source rather than through
+        # an attribute lookup a module could satisfy dynamically.
+        assert not re.findall(r"(?m)^_B1A_SUBPROCESS_SEALED\s*=.*$", text), module.__name__
 
 
-def test_the_subprocess_executor_still_cannot_be_constructed():
+def test_the_subprocess_executor_still_cannot_be_obtained_without_durable_authority():
+    """The executor is constructible now; what it still cannot be is obtained without authority."""
     from secp_worker.provisioning.process_executor import (
         ProcessExecutionError,
         SubprocessProcessExecutor,
     )
 
-    with pytest.raises(ProcessExecutionError, match="SEALED"):
-        SubprocessProcessExecutor()
-    with pytest.raises(ProcessExecutionError, match="SEALED"):
-        SubprocessProcessExecutor(armed=True)
+    class _Forged:
+        opentofu_executable = "/opt/secp/bin/tofu"
+        provider_mirror_identity = "forged"
+
+    for bad in (None, object(), _Forged()):
+        with pytest.raises(ProcessExecutionError, match="AuthorizedExecution"):
+            SubprocessProcessExecutor(authority=bad)
 
 
 def test_the_process_executor_factory_still_returns_the_fake():
@@ -467,7 +482,7 @@ def test_the_process_executor_factory_still_returns_the_fake():
     )
     from secp_worker.provisioning.process_executor import FakeProcessExecutor
 
-    settings = Settings(app_env="test", enable_opentofu_subprocess=True)
+    settings = Settings(app_env="test")
     grant = RealLabActivationGrant(manifest_id="m", _nonce="n")
     assert isinstance(build_process_executor(settings, grant=grant), FakeProcessExecutor)
 

@@ -36,7 +36,6 @@ from secp_worker.secrets import FakeSecretResolver
 REAL_ON = Settings(
     app_env="test",
     provisioning_application_mode="isolated_lab",
-    enable_real_provisioning=True,
     workflow_dispatch_mode="temporal",
 )
 REAL_OFF = Settings(app_env="test", provisioning_application_mode="simulator")
@@ -210,7 +209,6 @@ def test_real_provisioning_setting_required(session, principal, lab_env):
     settings = Settings(
         app_env="test",
         provisioning_application_mode="isolated_lab",
-        enable_real_provisioning=False,
         workflow_dispatch_mode="temporal",
     )
     with pytest.raises(ProvisioningRefusedError, match="real provisioning is disabled"):

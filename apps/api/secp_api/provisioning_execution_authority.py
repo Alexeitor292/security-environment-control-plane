@@ -175,6 +175,12 @@ class AuthorizedExecution:
     worker_installation_id: str
     toolchain_profile_id: uuid.UUID
     rendered_workspace_hash: str
+    #: The pinned binary and provider mirror the worker may use, carried HERE rather than read by
+    #: the worker from its own configuration. A worker that chose its own executable would be
+    #: choosing which binary performs an authorized apply, so the authority names it and the
+    #: process executor is constructed from this record alone.
+    opentofu_executable: str
+    provider_mirror_identity: str
     authority_version: str = EXECUTION_AUTHORITY_VERSION
 
 
@@ -257,6 +263,16 @@ def authorize_provisioning_execution(
     if observed_toolchain.rendered_workspace_hash.strip() == "":
         raise ExecutionAuthorityRefused("execution_configuration_digest_mismatch")
 
+    if not str(_profile_content(profile).get("executable", "")).strip():
+        # An authority that named no binary would produce an executor with nothing to run, and the
+        # refusal would surface as a command-grammar mismatch rather than as the unpinned profile
+        # it actually is.
+        raise ExecutionAuthorityRefused("execution_toolchain_binary_mismatch")
+    if not str(
+        (_profile_content(profile).get("provider_mirror") or {}).get("identity", "")
+    ).strip():
+        raise ExecutionAuthorityRefused("execution_toolchain_mirror_mismatch")
+
     approval = _authorized_change_set(
         session,
         manifest_id=manifest.id,
@@ -279,7 +295,17 @@ def authorize_provisioning_execution(
         worker_installation_id=worker_installation_id,
         toolchain_profile_id=profile.id,
         rendered_workspace_hash=observed_toolchain.rendered_workspace_hash,
+        opentofu_executable=str(_profile_content(profile).get("executable", "")),
+        provider_mirror_identity=str(
+            (_profile_content(profile).get("provider_mirror") or {}).get("identity", "")
+        ),
     )
+
+
+def _profile_content(profile: ToolchainProfile) -> dict:
+    """The profile's content as a mapping, or an empty one. Never raises: a malformed profile must
+    reach the refusals below as a mismatch, not as an exception from an accessor."""
+    return profile.content if isinstance(profile.content, dict) else {}
 
 
 def _selected_worker_of(operation: ProvisioningOperation) -> str | None:
@@ -391,7 +417,7 @@ def _assert_toolchain_matches(profile: ToolchainProfile, observed: ObservedToolc
     each differently: a wrong binary is a reinstall, a wrong provider is a re-pin, a wrong lockfile
     is a regeneration, a wrong mirror is a configuration change.
     """
-    content = profile.content if isinstance(profile.content, dict) else {}
+    content = _profile_content(profile)
     # The KEYS are the ones the shipped ToolchainProfile actually uses (`binary_integrity`,
     # `provider_lockfile_hash`, `provider_mirror.identity`), not names invented here. A comparison
     # against a key the profile does not write would read every profile as unpinned.
