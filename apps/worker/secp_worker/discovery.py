@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 
 from secp_api import audit
-from secp_api.enums import AuditAction
+from secp_api.enums import AuditAction, AuditOutcome
 from secp_api.errors import NotFoundError
 from secp_api.models import ExecutionTarget, ProviderInventorySnapshot
 from secp_api.services import inventory
@@ -87,7 +87,7 @@ def run_discovery(
             resource_id=target.id,
             organization_id=snap.organization_id,
             actor="worker",
-            outcome="failed",
+            outcome=AuditOutcome.failed,
             data={"reason": "secret reference could not be resolved"},
         )
         inventory.fail_snapshot(session, snap.id, error="secret resolution failed (redacted)")

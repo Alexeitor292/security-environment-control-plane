@@ -16,7 +16,13 @@ from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
-from secp_api.enums import AuditAction, Permission, ProvisioningOperationKind, ProvisioningStatus
+from secp_api.enums import (
+    AuditAction,
+    AuditOutcome,
+    Permission,
+    ProvisioningOperationKind,
+    ProvisioningStatus,
+)
 from secp_api.errors import DomainError, NotFoundError
 from secp_api.models import ProvisioningManifest, ProvisioningOperation
 from secp_api.provisioning_lifecycle import transition
@@ -167,7 +173,7 @@ def mark_failed(
         resource_id=operation.id,
         organization_id=operation.organization_id,
         actor="worker",
-        outcome="failed",
+        outcome=AuditOutcome.failed,
         data={"error": error},
     )
     session.flush()

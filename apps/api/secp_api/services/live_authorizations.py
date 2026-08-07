@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from secp_api import audit
 from secp_api.auth import Principal
-from secp_api.enums import AuditAction, LiveReadAuthorizationStatus, Permission
+from secp_api.enums import AuditAction, AuditOutcome, LiveReadAuthorizationStatus, Permission
 from secp_api.errors import DomainError, NotFoundError
 from secp_api.models import ExecutionTarget, LiveReadAuthorization, TargetOnboarding
 
@@ -172,7 +172,7 @@ def revoke_live_read_authorization(
         resource_id=authorization.id,
         organization_id=authorization.organization_id,
         actor=str(actor.user_id),
-        outcome="revoked",
+        outcome=AuditOutcome.revoked,
         data=_audit_payload(authorization, reason_code=authorization.revocation_reason_code),
     )
     session.flush()
@@ -208,6 +208,6 @@ def record_live_read_authorization_validation_refused(
         resource_id=authorization_id,
         organization_id=organization_id,
         actor=actor,
-        outcome="denied",
+        outcome=AuditOutcome.denied,
         data=data,
     )

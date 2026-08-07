@@ -148,23 +148,31 @@ def list_audit_events(
     exercise_id: uuid.UUID | None = None,
     limit: int = 200,
 ) -> list[AuditEvent]:
+    """The organization's most recent audit events, newest first.
+
+    ``limit`` bounds the RESULT, and ``exercise_id`` narrows what is counted toward it. The order
+    of those two operations is the whole point of this function's shape.
+
+    It used to apply the limit in SQL and then filter in Python, which answers a different
+    question: not "the most recent events about this exercise" but "the events about this exercise
+    among the organization's most recent 200 rows". Measured — one matching event, 13 unrelated
+    newer rows, `limit=200` returned it and `limit=5` returned **nothing**. Since the route does
+    not expose ``limit``, the real trigger was not a small page but an organization with more than
+    200 audit rows, which is every organization after a short while.
+
+    The failure mode is the reassuring one: an **empty list**, which reads as "nothing was audited
+    for this exercise" rather than "your filter ran after the page was cut". An audit surface that
+    answers "nothing happened" when it means "I did not look" is worse than one that errors.
+    """
     actor.require(Permission.audit_read)
-    stmt = (
-        select(AuditEvent)
-        .where(AuditEvent.organization_id == actor.organization_id)
-        .order_by(AuditEvent.created_at.desc())
-        .limit(limit)
-    )
-    events = list(session.execute(stmt).scalars().all())
+    stmt = select(AuditEvent).where(AuditEvent.organization_id == actor.organization_id)
     if exercise_id is not None:
-        # Include events directly about the exercise plus its child resources.
-        child_ids = _exercise_resource_ids(session, exercise_id)
-        events = [
-            e
-            for e in events
-            if e.resource_id in child_ids or str(exercise_id) == (e.resource_id or "")
-        ]
-    return events
+        # Events directly about the exercise plus its child resources. `_exercise_resource_ids`
+        # already includes the exercise's own id, so this single predicate covers both cases the
+        # Python filter used to test separately.
+        stmt = stmt.where(AuditEvent.resource_id.in_(_exercise_resource_ids(session, exercise_id)))
+    stmt = stmt.order_by(AuditEvent.created_at.desc()).limit(limit)
+    return list(session.execute(stmt).scalars().all())
 
 
 def _exercise_resource_ids(session: Session, exercise_id: uuid.UUID) -> set[str]:

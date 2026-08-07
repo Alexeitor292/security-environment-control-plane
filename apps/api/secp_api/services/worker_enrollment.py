@@ -61,7 +61,7 @@ from secp_api.enrollment_evidence import (
     verify_worker_result,
 )
 from secp_api.enrollment_signer_client import EnrollmentOfferSignerClient
-from secp_api.enums import AuditAction, Permission
+from secp_api.enums import AuditAction, AuditOutcome, Permission
 from secp_api.enums import WorkerEnrollmentErrorCode as EC
 from secp_api.errors import WorkerEnrollmentError
 from secp_api.models import _utcnow
@@ -446,7 +446,7 @@ def create_invitation_and_open(
         resource_id=loaded.state.enrollment_id,
         actor=str(actor.user_id),
         organization_id=actor.organization_id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={
             "deployment_site_label": deployment_site_label,
             "state": loaded.state.state,
@@ -1349,7 +1349,7 @@ def _audit_progress(
         resource_id=enrollment_id,
         actor=_audit_actor(actor),
         organization_id=actor.organization_id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={"state": state.state, "revision": state.revision},
     )
 
@@ -1463,7 +1463,7 @@ def revoke_enrollment(
         resource_id=enrollment_id,
         actor=str(actor.user_id),
         organization_id=actor.organization_id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={"state": new_state.state, "revision": new_state.revision},
     )
     return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
@@ -1520,7 +1520,7 @@ def mark_recovery_required(
         resource_id=enrollment_id,
         actor=str(actor.user_id),
         organization_id=actor.organization_id,
-        outcome="success",
+        outcome=AuditOutcome.success,
         data={"state": new_state.state, "revision": new_state.revision},
     )
     return TransitionOutcome(new_state, new_state.revision, deduplicated=False)
@@ -1864,7 +1864,7 @@ def _audit_page_integrity(
             resource_id=exc.enrollment_id,
             actor=str(actor.user_id),
             organization_id=actor.organization_id,
-            outcome="failure",
+            outcome=AuditOutcome.failed,
             data={"reason": exc.reason_code},
         )
     except Exception:  # noqa: BLE001 - never let auditing mask or replace the bounded refusal

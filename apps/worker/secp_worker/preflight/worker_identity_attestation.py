@@ -26,7 +26,7 @@ from datetime import UTC, datetime
 from typing import NoReturn, Protocol, runtime_checkable
 
 from secp_api import audit
-from secp_api.enums import AuditAction, WorkerIdentityStatus
+from secp_api.enums import AuditAction, AuditOutcome, WorkerIdentityStatus
 from secp_api.models import (
     ReadonlyStagingPreflight,
     WorkerIdentityEvidence,
@@ -254,7 +254,7 @@ def _record_refusal(session: Session, refused: WorkerIdentityVerificationRefused
         resource_id=refused.registration_id,
         organization_id=refused.organization_id,
         actor="worker",
-        outcome="refused",
+        outcome=AuditOutcome.refused,
         data={
             "reason_code": refused.reason_code,
             "worker_identity_contract_version": WORKER_IDENTITY_CONTRACT_VERSION,

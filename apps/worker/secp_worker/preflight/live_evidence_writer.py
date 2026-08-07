@@ -22,7 +22,7 @@ from datetime import datetime
 from typing import Protocol, runtime_checkable
 
 from secp_api import audit
-from secp_api.enums import AuditAction, LivePreflightEvidenceStatus
+from secp_api.enums import AuditAction, AuditOutcome, LivePreflightEvidenceStatus
 from secp_api.live_preflight_evidence_schema import (
     LIVE_PREFLIGHT_EVIDENCE_SCHEMA_VERSION,
     build_live_evidence_payload,
@@ -106,7 +106,7 @@ class SealedLivePreflightEvidenceWriter:
             resource_id=str(context.preflight_id),
             organization_id=context.organization_id,
             actor="worker",
-            outcome="refused",
+            outcome=AuditOutcome.refused,
             data={
                 "reason_code": "live_preflight_evidence_writer_sealed",
                 "evidence_schema_version": LIVE_PREFLIGHT_EVIDENCE_SCHEMA_VERSION,
@@ -192,7 +192,7 @@ class DurableLivePreflightEvidenceWriter:
             resource_id=str(row.id),
             organization_id=row.organization_id,
             actor="worker",
-            outcome="written",
+            outcome=AuditOutcome.success,
             data={
                 "preflight_id": str(row.preflight_id),
                 "status": row.status.value,

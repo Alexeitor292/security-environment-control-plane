@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from secp_api import audit
 from secp_api.enums import (
     AuditAction,
+    AuditOutcome,
     ReadonlyPreflightOutcome,
     ReadonlyPreflightStatus,
 )
@@ -207,7 +208,13 @@ def claim_and_process_one(
         resource_id=candidate.id,
         organization_id=candidate.organization_id,
         actor="worker",
-        outcome="success" if is_ready else "denied",
+        outcome=(
+            AuditOutcome.failed
+            if is_internal
+            else AuditOutcome.success
+            if is_ready
+            else AuditOutcome.refused
+        ),
         data={
             "execution_target_id": str(candidate.execution_target_id),
             "outcome_code": result.outcome.value,

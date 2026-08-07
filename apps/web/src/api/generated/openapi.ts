@@ -761,6 +761,32 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/manifests": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Manifests
+         * @description Enumerate the organization's provisioning manifests, newest first.
+         *
+         *     Declared BEFORE ``/manifests/{manifest_id}`` deliberately. FastAPI matches routes in
+         *     declaration order, and a literal path that follows a parameterised sibling is still reachable
+         *     here only because ``manifest_id`` is typed as a UUID — a rename to ``str`` would silently
+         *     capture this path and return a 404 for every list request. Ordering it first removes the
+         *     dependence on that coincidence.
+         */
+        get: operations["list_manifests_api_v1_manifests_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/manifests/{manifest_id}": {
         parameters: {
             query?: never;
@@ -10743,6 +10769,38 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_manifests_api_v1_manifests_get: {
+        parameters: {
+            query?: {
+                deployment_plan_id?: string | null;
+                execution_target_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ManifestOut"][];
                 };
             };
             /** @description Validation Error */

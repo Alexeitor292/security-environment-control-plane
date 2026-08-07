@@ -40,10 +40,23 @@ from __future__ import annotations
 
 from secp_scenario_schema import content_hash
 
+from secp_worker.provisioning.provider_schema_evidence import (
+    ProviderSchemaObservation,
+    schema_validation_reasons,
+    schema_validation_status,
+)
+
 #: The one status this module can ever emit. There is deliberately no "applied" variant here: a
 #: document describing an apply is a different artifact produced by a different stage.
 EXECUTION_STATUS_NOT_APPLIED = "NOT APPLIED"
 
+#: NOT bumped for ``provider_schema_validation_reasons``, deliberately. The addition is purely
+#: additive — ``provider_schema_validation`` keeps the same two-value domain and, until a real
+#: mirror exists, the same value — so every v1 reader continues to read exactly what it read
+#: before. This literal is mirrored in three other places across two planes
+#: (``schemas_proxmox.py``, whose docstring is published as the OpenAPI description, the committed
+#: spec, and ``apps/web/src/api/recorded-documents.ts``), so a bump is a cross-plane change and is
+#: owed to consumers only when something a consumer reads actually changes meaning.
 PLAN_DOCUMENT_VERSION = "secp-proxmox/plan-document/v1"
 
 
@@ -87,13 +100,29 @@ def build_plan_document(
     change_set_hash_value: str,
     *,
     desired_state: dict,
-    provider_schema_verified: bool = False,
+    schema_observation: ProviderSchemaObservation | None = None,
+    schema_attestation: object | None = None,
+    expected_executor_implementation_id: str = "",
+    expected_executor_implementation_digest: str = "",
 ) -> dict:
     """Build the durable, secret-free plan document for operator review.
 
-    ``provider_schema_verified`` stays ``False`` unless a real ``tofu validate`` against the pinned
-    provider actually ran. It is a parameter rather than a constant so the honest value can be
-    supplied once such a check exists — not so it can be asserted without one.
+    Two schema arguments, split by authority, replacing the former
+    ``provider_schema_verified: bool``:
+
+    ``schema_observation``
+        What the inspection run saw. Public, freely constructible, and unable to produce
+        ``verified`` on its own. It contributes the REASONS an operator reads.
+
+    ``schema_attestation``
+        The only thing that can produce ``verified``. Token-minted by the attested
+        schema-inspection producer, and re-checked here against this document's own workspace hash
+        and against the executor identity the caller is building under — so an attestation minted
+        for another plan, another toolchain, or an earlier command grammar is refused rather than
+        trusted. Typed ``object`` so a look-alike is rejected by type, not by duck typing.
+
+    Omitting both yields ``unverified`` with a stated reason, which is the correct reading for every
+    caller that has not run the check — today, all of them.
     """
     if not isinstance(change_set, dict):
         raise PlanDocumentError("change set must be an object")
@@ -124,7 +153,29 @@ def build_plan_document(
         "workspace_hash": change_set.get("workspace_hash"),
         "kind": change_set.get("kind"),
         "provenance": dict(change_set.get("provenance") or {}),
-        "provider_schema_validation": ("verified" if provider_schema_verified else "unverified"),
+        # The workspace hash is what makes an attestation non-transferable: it is read from THIS
+        # change set, so an attestation minted for a different rendered workspace cannot verify
+        # this document no matter how well-formed it is.
+        "provider_schema_validation": schema_validation_status(
+            schema_attestation,
+            schema_observation,
+            expected_workspace_hash=str(change_set.get("workspace_hash") or ""),
+            expected_executor_implementation_id=expected_executor_implementation_id,
+            expected_executor_implementation_digest=expected_executor_implementation_digest,
+        ),
+        # Why it is not verified, in the operator's own document. An `unverified` with no reason is
+        # a field nobody can act on: it does not distinguish "the check has not been built yet"
+        # from "the pinned provider is missing a type this plan needs", and those call for opposite
+        # responses. Empty exactly when the status is `verified`.
+        "provider_schema_validation_reasons": list(
+            schema_validation_reasons(
+                schema_attestation,
+                schema_observation,
+                expected_workspace_hash=str(change_set.get("workspace_hash") or ""),
+                expected_executor_implementation_id=expected_executor_implementation_id,
+                expected_executor_implementation_digest=expected_executor_implementation_digest,
+            )
+        ),
         "summary": {
             "resource_count": summary.get("count", len(resources)),
             "by_action": dict(summary.get("by_action") or {}),

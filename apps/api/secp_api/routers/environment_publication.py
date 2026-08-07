@@ -21,7 +21,7 @@ from secp_api import audit
 from secp_api.auth import Principal
 from secp_api.db import session_scope
 from secp_api.deps import DB_SESSION, current_principal
-from secp_api.enums import AuditAction
+from secp_api.enums import AuditAction, AuditOutcome
 from secp_api.enums import EnvironmentPublicationErrorCode as EC
 from secp_api.errors import EnvironmentPublicationError
 from secp_api.schemas import VersionOut
@@ -85,7 +85,7 @@ def _record_refusal(principal: Principal, body: EnvironmentPublicationRequest, c
                 resource_id=str(body.template_id),
                 actor=str(principal.user_id),
                 organization_id=principal.organization_id,
-                outcome="denied",
+                outcome=AuditOutcome.denied,
                 data=_refusal_audit_data(body, code),
             )
     except Exception:
@@ -139,7 +139,7 @@ def publish_environment_version(
                 resource_id=str(result.version.id),
                 actor=str(principal.user_id),
                 organization_id=principal.organization_id,
-                outcome="success",
+                outcome=AuditOutcome.success,
                 data=_success_audit_data(result.version),
             )
             session.commit()
