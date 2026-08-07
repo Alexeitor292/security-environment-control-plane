@@ -113,8 +113,14 @@ async function measure(): Promise<Measured> {
   for (const source of sources) {
     for (const span of auditRecordCalls(source)) {
       callSites += 1;
-      const found = /outcome\s*=\s*["']([a-z_]+)["']/.exec(span);
-      if (found) literals.add(found[1]);
+      // TWO shapes, because #127 closed this vocabulary into an enum and the call sites moved
+      // from `outcome="denied"` to `outcome=AuditOutcome.denied`. Reading only the string form
+      // silently measured an EMPTY set the moment that landed — the exact failure the
+      // "finds the writers at all" precondition below exists to catch, and it did catch it.
+      const literal = /outcome\s*=\s*["']([a-z_]+)["']/.exec(span);
+      const member = /outcome\s*=\s*AuditOutcome\.([a-z_]+)/.exec(span);
+      if (literal) literals.add(literal[1]);
+      else if (member) literals.add(member[1]);
       else if (!/outcome\s*=/.test(span)) defaulted += 1;
     }
   }
@@ -131,7 +137,11 @@ describe("audit outcome vocabulary, measured from the emitting services", () => 
     const { literals, callSites, defaulted } = await measure();
     expect(callSites, "audit.record call sites").toBeGreaterThan(50);
     expect(defaulted, "call sites relying on the success default").toBeGreaterThan(50);
-    expect(literals.size, "distinct outcome literals").toBeGreaterThanOrEqual(7);
+    // SIX, not the seven this measured before #127. That PR closed the write vocabulary into
+    // `AuditOutcome`, which removed the stray `failure` spelling that sat alongside `failed`.
+    // A DROP is the honest signal here: the set got smaller because a duplicate was retired,
+    // and the floor tracks the enum rather than a remembered number.
+    expect(literals.size, "distinct outcome literals").toBeGreaterThanOrEqual(6);
   });
 
   it("takes its default from the helper signature rather than assuming it", async () => {
@@ -139,7 +149,12 @@ describe("audit outcome vocabulary, measured from the emitting services", () => 
     // ledger. If it ever became something other than "success" this surface would
     // be toning the majority of rows from a value nobody passed.
     const { auditPy } = await measure();
-    expect(auditPy).toMatch(/outcome:\s*str\s*=\s*"success"/);
+    // The signature is now enum-typed (#127): `outcome: AuditOutcome = AuditOutcome.success`.
+    // Still read from the signature rather than assumed — what changed is the type, not the
+    // property. The union `AuditOutcome | str` is deliberately NOT what it accepts, because a
+    // union is what let a ninth spelling in.
+    expect(auditPy).toMatch(/outcome:\s*AuditOutcome\s*=\s*AuditOutcome\.success/);
+    expect(auditPy).not.toMatch(/outcome:\s*AuditOutcome\s*\|\s*str/);
   });
 
   it("tones no discovered outcome as healthy except success", async () => {
