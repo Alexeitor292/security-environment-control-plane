@@ -40,6 +40,7 @@ from secp_worker.provisioning.toolchain_verify import (
     R_PATH_OUTSIDE_ROOT,
     R_PERMISSION_INVALID,
     R_PROFILE_INVALID,
+    R_PROVIDER_PIN_MISMATCH,
     R_RENDERER_MISMATCH,
     R_RUNTIME_DOWNLOAD_NOT_DISABLED,
     R_SYMLINK_REFUSED,
@@ -97,6 +98,32 @@ def _symlinks_supported(tmp: str) -> bool:
     return True
 
 
+#: A clearly-fake provider on a non-routable registry. The profile pins the SAME string the
+#: lockfile writes, which is what lets the verifier compare them with ``!=`` rather than a rule.
+_FAKE_PROVIDER_ADDRESS = "registry.fake/secpfake/labproxmox"
+_FAKE_PROVIDER_VERSION = "0.9.9-fake"
+#: A well-formed but clearly-fake ``h1:`` dirhash (43 base64 chars + '='), the singular per-provider
+#: hash the profile pins.
+_FAKE_PROVIDER_HASH = "h1:" + "A" * 43 + "="
+_OTHER_PROVIDER_HASH = "h1:" + "B" * 43 + "="
+
+
+def _lockfile(address: str, version: str, hashes: list[str]) -> bytes:
+    """An OpenTofu dependency lockfile in the exact shape ``tofu init`` writes."""
+    lines = [
+        '# This file is maintained automatically by "tofu init".',
+        "# Manual edits may be lost in future updates.",
+        "",
+        f'provider "{address}" {{',
+        f'  version     = "{version}"',
+        f'  constraints = "{version}"',
+        "  hashes = [",
+    ]
+    lines += [f'    "{h}",' for h in hashes]
+    lines += ["  ]", "}", ""]
+    return "\n".join(lines).encode()
+
+
 def build_fixture(root: str) -> tuple[ToolchainFilesystemLayout, dict]:
     """Build a complete, valid inert toolchain under ``root`` and a matching secret-free profile."""
     os.mkdir(os.path.join(root, "bin"))
@@ -117,7 +144,7 @@ def build_fixture(root: str) -> tuple[ToolchainFilesystemLayout, dict]:
     )
     _write(os.path.join(root, "bundle", "main.tf"), b"module fake {}\n")
     _write(os.path.join(root, "bundle", "sub", "vars.tf"), b"variable fake {}\n")
-    lock_bytes = b'provider "fake" {\n  version = "1.0.0"\n}\n'
+    lock_bytes = _lockfile(_FAKE_PROVIDER_ADDRESS, _FAKE_PROVIDER_VERSION, [_FAKE_PROVIDER_HASH])
     _write(os.path.join(root, "meta", "provider.lock"), lock_bytes)
     _write(
         os.path.join(root, "mirror", "registry.fake", "provider_plugin.bin"),
@@ -157,6 +184,9 @@ def build_fixture(root: str) -> tuple[ToolchainFilesystemLayout, dict]:
         "adapter_kind": "proxmox",
         "module_bundle_id": "secp-fake-lab-bundle",
         "module_bundle_hash": bundle_hash,
+        "provider_source": _FAKE_PROVIDER_ADDRESS,
+        "provider_version": _FAKE_PROVIDER_VERSION,
+        "provider_checksum": _FAKE_PROVIDER_HASH,
         "provider_lockfile_hash": _sha256(lock_bytes),
         "renderer_version": _RENDERER_VERSION,
         "state_backend": {"kind": "http", "reference": "secp-fake-remote-state/lab"},
@@ -189,6 +219,7 @@ def test_full_attestation_succeeds(tmp_path):
         "binary_digest",
         "module_bundle",
         "lockfile",
+        "provider_pin",
         "mirror",
         "renderer",
         "cli_config",
@@ -488,6 +519,234 @@ def test_lockfile_digest_mismatch(tmp_path):
     assert R_LOCKFILE_MISMATCH in result.reasons
 
 
+# --- the provider the lockfile actually pins -----------------------------------------------------
+
+
+def _relock(tmp_path, profile: dict, lock_bytes: bytes) -> None:
+    """Replace the lockfile AND re-pin its digest, so only the provider pin is under test.
+
+    Without re-pinning, every case below would fail at the lockfile-digest facet and never reach the
+    parser — the test would pass while proving nothing about the content check.
+    """
+    _write(os.path.join(str(tmp_path), "meta", "provider.lock"), lock_bytes)
+    profile["provider_lockfile_hash"] = _sha256(lock_bytes)
+
+
+def test_a_lockfile_pinning_a_different_provider_refuses(tmp_path):
+    """The lockfile is the reviewed lockfile, and it installs the wrong provider.
+
+    This is the case ``provider_lockfile_hash`` alone cannot see: the digest matches whatever file
+    is on disk, so a reviewed-and-hashed lockfile naming a different provider passes it.
+    """
+    layout, profile = build_fixture(str(tmp_path))
+    _relock(
+        tmp_path,
+        profile,
+        _lockfile("registry.fake/someone/else", _FAKE_PROVIDER_VERSION, [_FAKE_PROVIDER_HASH]),
+    )
+    result = _verify(str(tmp_path), layout, profile)
+    assert "lockfile" in result.verified  # the digest is fine
+    assert "provider_pin" not in result.verified  # the content is not
+    assert R_PROVIDER_PIN_MISMATCH in result.reasons
+
+
+def test_a_lockfile_pinning_a_different_version_refuses(tmp_path):
+    layout, profile = build_fixture(str(tmp_path))
+    _relock(
+        tmp_path, profile, _lockfile(_FAKE_PROVIDER_ADDRESS, "0.9.8-fake", [_FAKE_PROVIDER_HASH])
+    )
+    result = _verify(str(tmp_path), layout, profile)
+    assert "provider_pin" not in result.verified
+    assert R_PROVIDER_PIN_MISMATCH in result.reasons
+
+
+def test_a_lockfile_without_the_pinned_checksum_refuses(tmp_path):
+    """Right provider, right version, an artifact nobody authorized."""
+    layout, profile = build_fixture(str(tmp_path))
+    _relock(
+        tmp_path,
+        profile,
+        _lockfile(_FAKE_PROVIDER_ADDRESS, _FAKE_PROVIDER_VERSION, [_OTHER_PROVIDER_HASH]),
+    )
+    result = _verify(str(tmp_path), layout, profile)
+    assert "provider_pin" not in result.verified
+    assert R_PROVIDER_PIN_MISMATCH in result.reasons
+
+
+def test_a_second_provider_block_refuses_even_when_the_pinned_one_is_correct(tmp_path):
+    """``tofu init`` installs every provider the lockfile names.
+
+    An extra block is an extra binary running against the cluster with nothing in the authority
+    naming it, so the authorized provider being present and correct is not sufficient.
+    """
+    layout, profile = build_fixture(str(tmp_path))
+    correct = _lockfile(_FAKE_PROVIDER_ADDRESS, _FAKE_PROVIDER_VERSION, [_FAKE_PROVIDER_HASH])
+    extra = _lockfile("registry.fake/someone/else", "1.0.0", [_OTHER_PROVIDER_HASH])
+    _relock(tmp_path, profile, correct + b"\n" + extra)
+    result = _verify(str(tmp_path), layout, profile)
+    assert "lockfile" in result.verified
+    assert "provider_pin" not in result.verified
+    assert R_PROVIDER_PIN_MISMATCH in result.reasons
+
+
+def test_two_dirhashes_in_one_block_refuse_rather_than_picking(tmp_path):
+    """ "Which artifact is this" has no single answer, and choosing one would be deciding for the
+    operator. It is also what makes the h1 hash safely measurable without consulting the pin."""
+    layout, profile = build_fixture(str(tmp_path))
+    _relock(
+        tmp_path,
+        profile,
+        _lockfile(
+            _FAKE_PROVIDER_ADDRESS,
+            _FAKE_PROVIDER_VERSION,
+            [_FAKE_PROVIDER_HASH, _OTHER_PROVIDER_HASH],
+        ),
+    )
+    result = _verify(str(tmp_path), layout, profile)
+    assert "provider_pin" not in result.verified
+    assert R_PROVIDER_PIN_MISMATCH in result.reasons
+
+
+def test_zh_release_hashes_alongside_the_dirhash_are_ignored(tmp_path):
+    """A real lockfile carries one ``h1:`` and many ``zh:``. Only the ``h1:`` is the pin."""
+    layout, profile = build_fixture(str(tmp_path))
+    _relock(
+        tmp_path,
+        profile,
+        _lockfile(
+            _FAKE_PROVIDER_ADDRESS,
+            _FAKE_PROVIDER_VERSION,
+            ["zh:" + "ab" * 32, _FAKE_PROVIDER_HASH, "zh:" + "cd" * 32],
+        ),
+    )
+    result = _verify(str(tmp_path), layout, profile)
+    assert result.ok, result.reasons
+
+
+# --- the measurement handed to the execution authority -------------------------------------------
+
+
+def test_measure_reads_every_field_off_the_disk(tmp_path):
+    """The observation the authority compares against the profile.
+
+    Asserted field by field against what the fixture WROTE, not against the profile: a measurement
+    that agreed with the profile because it read the profile would make the authority's comparison
+    a tautology.
+    """
+    layout, profile = build_fixture(str(tmp_path))
+    observed = RealToolchainVerifier(layout).measure(rendered_workspace_hash="sha256:" + "9" * 64)
+
+    assert observed.opentofu_version == "9.9.9"
+    assert observed.opentofu_binary_digest == _sha256(_EXEC_BYTES)
+    assert observed.provider_source == _FAKE_PROVIDER_ADDRESS
+    assert observed.provider_version == _FAKE_PROVIDER_VERSION
+    assert observed.provider_checksum == _FAKE_PROVIDER_HASH
+    assert observed.rendered_workspace_hash == "sha256:" + "9" * 64
+    # And it agrees with the profile the same fixture built, which is what makes an authorization
+    # against this pair succeed rather than refuse.
+    assert observed.provider_lockfile_digest == profile["provider_lockfile_hash"]
+    assert observed.provider_mirror_identity == profile["provider_mirror"]["identity"]
+
+
+def test_measure_cannot_be_handed_an_expected_value(tmp_path):
+    """Structural: ``measure`` takes no profile, so it has nothing to echo.
+
+    This is the property that keeps the authority's toolchain comparison meaningful. A future
+    signature change that let a caller pass the expected toolchain in would silently turn six
+    comparisons into six restatements, and nothing else in the suite would notice.
+    """
+    import inspect
+
+    params = inspect.signature(RealToolchainVerifier.measure).parameters
+    assert set(params) == {"self", "rendered_workspace_hash"}
+
+
+def test_measure_reports_an_unreadable_toolchain_distinctly(tmp_path):
+    """Not a refusal. "The mirror is unreadable" and "the toolchain is the wrong one" send an
+    operator to different places."""
+    from secp_worker.provisioning.toolchain_verify import ToolchainMeasurementError
+
+    layout, _profile = build_fixture(str(tmp_path))
+    broken = ToolchainFilesystemLayout(**{**layout.__dict__, "provider_lockfile": "meta/absent"})
+    with pytest.raises(ToolchainMeasurementError) as exc:
+        RealToolchainVerifier(broken).measure(rendered_workspace_hash="sha256:" + "9" * 64)
+    assert exc.value.reason
+    assert str(tmp_path) not in str(exc.value)
+
+
+def test_measure_refuses_an_unreadable_provider_pin_rather_than_reporting_blanks(tmp_path):
+    """A partially-filled observation would refuse at the authority for the wrong reason."""
+    from secp_worker.provisioning.toolchain_verify import ToolchainMeasurementError
+
+    layout, profile = build_fixture(str(tmp_path))
+    _relock(tmp_path, profile, b"# no provider block here\n")
+    with pytest.raises(ToolchainMeasurementError):
+        RealToolchainVerifier(layout).measure(rendered_workspace_hash="sha256:" + "9" * 64)
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        # A namespace that merely ENDS WITH the pinned one. This is the case a suffix match would
+        # wave through, and the reason the profile pins the fully-qualified form.
+        "registry.fake/evilsecpfake/labproxmox",
+        # The right namespace and type from a DIFFERENT registry.
+        "registry.evil/secpfake/labproxmox",
+        # The registry-less short form. It cannot equal a fully-qualified pin, and the profile
+        # schema refuses to pin it in the first place.
+        "secpfake/labproxmox",
+    ],
+)
+def test_only_the_exact_provider_address_satisfies_the_pin(tmp_path, address):
+    """Byte equality, no prefix or suffix rule anywhere in the chain."""
+    layout, profile = build_fixture(str(tmp_path))
+    _relock(tmp_path, profile, _lockfile(address, _FAKE_PROVIDER_VERSION, [_FAKE_PROVIDER_HASH]))
+    result = _verify(str(tmp_path), layout, profile)
+    assert "provider_pin" not in result.verified
+    assert R_PROVIDER_PIN_MISMATCH in result.reasons
+
+
+def test_a_lockfile_the_parser_cannot_read_refuses_rather_than_skipping(tmp_path):
+    """A shape with no parseable provider block yields zero blocks, which is a refusal.
+
+    The dangerous alternative is a parser that finds nothing and reports the facet verified because
+    it saw no disagreement.
+    """
+    layout, profile = build_fixture(str(tmp_path))
+    _relock(tmp_path, profile, b"# a lockfile in some shape this parser does not read\n")
+    result = _verify(str(tmp_path), layout, profile)
+    assert "lockfile" in result.verified
+    assert "provider_pin" not in result.verified
+    assert R_PROVIDER_PIN_MISMATCH in result.reasons
+
+
+def test_a_failed_lockfile_digest_leaves_the_provider_pin_unverified(tmp_path):
+    """Bytes whose digest did not check out are never parsed."""
+    layout, profile = build_fixture(str(tmp_path))
+    profile["provider_lockfile_hash"] = _sha256(b"not this file")
+    result = _verify(str(tmp_path), layout, profile)
+    assert "lockfile" not in result.verified
+    assert "provider_pin" not in result.verified
+
+
+def test_the_hashed_bytes_and_the_parsed_bytes_are_one_read(tmp_path):
+    """The lockfile is opened ONCE for both facets.
+
+    Two reads would verify a digest over bytes that are not necessarily the bytes the provider pin
+    was checked against, which is a swap window an attacker with filesystem access can hit. Asserted
+    structurally: ``_attest_lockfile`` returns the bytes it hashed, and ``_attest_provider_pin``
+    takes bytes rather than a path, so there is no second open to race.
+    """
+    import inspect
+
+    from secp_worker.provisioning.toolchain_verify import RealToolchainVerifier as _RTV
+
+    assert "bytes" in str(inspect.signature(_RTV._attest_lockfile).return_annotation)
+    pin_params = set(inspect.signature(_RTV._attest_provider_pin).parameters)
+    assert "lockfile_bytes" in pin_params
+    assert "root" not in pin_params, "the provider pin must not be able to open the file itself"
+
+
 # --- mirror --------------------------------------------------------------------------------------
 
 
@@ -601,6 +860,9 @@ def _valid_manifest(profile: dict) -> dict:
         "binary_integrity": profile["binary_integrity"],
         "module_bundle_id": profile["module_bundle_id"],
         "module_bundle_hash": profile["module_bundle_hash"],
+        "provider_source": profile["provider_source"],
+        "provider_version": profile["provider_version"],
+        "provider_checksum": profile["provider_checksum"],
         "provider_lockfile_hash": profile["provider_lockfile_hash"],
         "provider_mirror_identity": profile["provider_mirror"]["identity"],
         "renderer_version": profile["renderer_version"],
@@ -740,6 +1002,13 @@ def test_construction_and_import_do_no_filesystem_io(tmp_path):
 
 
 def test_fake_verifier_default_attests_expanded_facets(tmp_path):
+    """The literal list is a tripwire, deliberately not derived from ``_REQUIRED_FACETS``.
+
+    Deriving it would make the assertion restate the fake's own default and pass for any facet set
+    at all. Written out, adding a facet fails here until someone confirms the fake should attest it
+    — which for a fake that must stay usable in every non-real test it always should, but the
+    confirmation is the point.
+    """
     v = FakeToolchainVerifier()
     result = v.verify({})
     assert result.ok
@@ -749,6 +1018,7 @@ def test_fake_verifier_default_attests_expanded_facets(tmp_path):
         "binary_digest",
         "module_bundle",
         "lockfile",
+        "provider_pin",
         "mirror",
         "renderer",
         "cli_config",

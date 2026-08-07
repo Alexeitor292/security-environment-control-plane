@@ -121,6 +121,8 @@ EXECUTION_REFUSAL_REASONS: tuple[str, ...] = (
     "execution_toolchain_profile_not_active",
     "execution_toolchain_binary_mismatch",
     "execution_toolchain_provider_mismatch",
+    "execution_toolchain_provider_source_mismatch",
+    "execution_toolchain_provider_checksum_mismatch",
     "execution_toolchain_lockfile_mismatch",
     "execution_toolchain_mirror_mismatch",
     # artifact
@@ -153,7 +155,9 @@ class ObservedToolchain:
 
     opentofu_version: str
     opentofu_binary_digest: str
+    provider_source: str
     provider_version: str
+    provider_checksum: str
     provider_lockfile_digest: str
     provider_mirror_identity: str
     rendered_workspace_hash: str
@@ -413,19 +417,22 @@ def _assert_observation_current(
 def _assert_toolchain_matches(profile: ToolchainProfile, observed: ObservedToolchain) -> None:
     """The profile says what the toolchain must be; the worker says what it is.
 
-    Four separate comparisons rather than one digest over all of them, because an operator resolves
-    each differently: a wrong binary is a reinstall, a wrong provider is a re-pin, a wrong lockfile
-    is a regeneration, a wrong mirror is a configuration change.
+    Six separate comparisons rather than one digest over all of them, because an operator resolves
+    each differently: a wrong binary is a reinstall, a wrong provider source is a re-review of the
+    bundle, a wrong provider version is a re-pin, a wrong provider checksum is a compromised or
+    rebuilt mirror artifact, a wrong lockfile is a regeneration, a wrong mirror is a configuration
+    change. A single combined digest would answer "something moved" and send an operator looking.
     """
     content = _profile_content(profile)
     # The KEYS are the ones the shipped ToolchainProfile actually uses (`binary_integrity`,
-    # `provider_lockfile_hash`, `provider_mirror.identity`), not names invented here. A comparison
-    # against a key the profile does not write would read every profile as unpinned.
+    # `provider_source`, `provider_version`, `provider_checksum`, `provider_lockfile_hash`,
+    # `provider_mirror.identity`), not names invented here. A comparison against a key the profile
+    # does not write would read every profile as unpinned.
     #
-    # `provider_version` is deliberately included and is NOT in the shipped profile shape today —
-    # so every current profile refuses at this check. That is the correct direction: the Proxmox
-    # provider version is a required pin for M1, and an authority that skipped it because the field
-    # was missing would be treating "unpinned" as "acceptable".
+    # The three provider pins were absent from the profile when this derivation landed, so every
+    # profile refused here — deliberately, because treating "unpinned" as "acceptable" is how a pin
+    # becomes decorative. `ToolchainProfileSpec` now requires all three, so the refusal is once
+    # again a statement about a specific wrong toolchain rather than about a missing schema.
     mirror = content.get("provider_mirror")
     mirror_identity = mirror.get("identity") if isinstance(mirror, dict) else None
     for expected, actual, reason in (
@@ -434,7 +441,17 @@ def _assert_toolchain_matches(profile: ToolchainProfile, observed: ObservedToolc
             observed.opentofu_binary_digest,
             "toolchain_binary_mismatch",
         ),
+        (
+            content.get("provider_source"),
+            observed.provider_source,
+            "toolchain_provider_source_mismatch",
+        ),
         (content.get("provider_version"), observed.provider_version, "toolchain_provider_mismatch"),
+        (
+            content.get("provider_checksum"),
+            observed.provider_checksum,
+            "toolchain_provider_checksum_mismatch",
+        ),
         (
             content.get("provider_lockfile_hash"),
             observed.provider_lockfile_digest,

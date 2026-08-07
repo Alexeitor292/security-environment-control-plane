@@ -2,8 +2,13 @@
 
 Before init/plan/apply/destroy, the ``OpenTofuRunner`` requires *proof* that the pinned toolchain
 provenance holds: executable identity, exact version, binary-integrity digest, module-bundle
-identity/hash, provider lockfile hash, offline provider-mirror identity, renderer version, the
-offline CLI configuration, the remote-state backend class, and that runtime download is disabled.
+identity/hash, provider lockfile hash, **the provider the lockfile actually pins**, offline
+provider-mirror identity, renderer version, the offline CLI configuration, the remote-state backend
+class, and that runtime download is disabled.
+
+The ``provider_pin`` facet is the one that reads content rather than hashing it. Every other
+filesystem facet answers "is this object the reviewed object"; ``provider_pin`` answers "does the
+reviewed object *say* what the authority authorized", which a digest over the same file cannot.
 
 * ``FakeToolchainVerifier`` (B1-A default) attests the pinned facet NAMES without touching any real
   binary, file, provider, or mirror. It remains the ONLY verifier wired into the execution path;
@@ -58,6 +63,7 @@ _REQUIRED_FACETS = (
     "binary_digest",
     "module_bundle",
     "lockfile",
+    "provider_pin",
     "mirror",
     "renderer",
     "cli_config",
@@ -86,6 +92,18 @@ _SHA256_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 _OFFLINE_NETWORK_TOKENS = frozenset({"offline", "none", "air-gapped", "airgapped", "mirror-only"})
 _LOCAL_STATE_TOKENS = frozenset({"local", "local-state", "localfs", "file", "disk", ""})
 
+# The OpenTofu dependency-lockfile grammar this verifier reads. Only the three facts the profile
+# pins are parsed — the address, the version and the hash list — because a general HCL parser here
+# would be a second configuration-language implementation whose disagreements with OpenTofu's own
+# are exactly the kind of gap this check exists to close. A lockfile these patterns cannot read
+# yields zero or many blocks and is REFUSED, never skipped.
+_LOCKFILE_PROVIDER_BLOCK_RE = re.compile(
+    r'^provider\s+"([^"\n]+)"\s*\{(.*?)^\}', re.MULTILINE | re.DOTALL
+)
+_LOCKFILE_VERSION_RE = re.compile(r'^\s*version\s*=\s*"([^"\n]+)"\s*$', re.MULTILINE)
+#: The ``h1:`` dirhash. Exactly one per provider block, which is why it is the pinnable one.
+_LOCKFILE_H1_RE = re.compile(r'"(h1:[A-Za-z0-9+/]{43}=)"')
+
 _O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)  # POSIX no-follow-at-open; 0 (no-op) elsewhere
 _O_BINARY = getattr(os, "O_BINARY", 0)
 _POSIX = os.name == "posix"
@@ -107,6 +125,7 @@ R_VERSION_MISMATCH = "version_mismatch"
 R_BINARY_DIGEST_MISMATCH = "binary_digest_mismatch"
 R_MODULE_BUNDLE_MISMATCH = "module_bundle_mismatch"
 R_LOCKFILE_MISMATCH = "lockfile_mismatch"
+R_PROVIDER_PIN_MISMATCH = "provider_pin_mismatch"
 R_MIRROR_MISMATCH = "mirror_mismatch"
 R_RENDERER_MISMATCH = "renderer_mismatch"
 R_CLI_CONFIG_INVALID = "cli_config_invalid"
@@ -207,6 +226,21 @@ def render_offline_cli_config(mirror_abs_path: str) -> bytes:
 
 class _AttestError(Exception):
     """Internal control-flow signal carrying only a bounded reason code (no path/content/text)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+class ToolchainMeasurementError(Exception):
+    """:meth:`RealToolchainVerifier.measure` could not read the toolchain.
+
+    Public, unlike :class:`_AttestError`, because a caller has to distinguish it from a refusal:
+    "this worker's mirror is unreadable" and "this worker's toolchain is the wrong one" are
+    different operator actions, and a measurement failure that surfaced as an authority refusal
+    would report the second when the truth is the first. Carries one bounded reason code and never
+    a path, a digest or file content.
+    """
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -462,6 +496,9 @@ _MANIFEST_KEYS = frozenset(
         "binary_integrity",
         "module_bundle_id",
         "module_bundle_hash",
+        "provider_source",
+        "provider_version",
+        "provider_checksum",
         "provider_lockfile_hash",
         "provider_mirror_identity",
         "renderer_version",
@@ -550,13 +587,25 @@ class RealToolchainVerifier:
             R_MODULE_BUNDLE_MISMATCH,
             lambda: self._attest_module_bundle(root, spec),
         )
-        self._facet(
-            verified,
-            _reason,
-            "lockfile",
-            R_LOCKFILE_MISMATCH,
-            lambda: self._attest_lockfile(root, spec),
-        )
+        # lockfile + provider_pin share ONE read of the lockfile, so the digest that is verified and
+        # the content that is parsed are the same bytes. A failed lockfile facet leaves
+        # ``provider_pin`` unverified rather than parsing bytes whose digest did not check out.
+        lockfile_bytes: bytes | None = None
+        try:
+            lockfile_bytes = self._attest_lockfile(root, spec)
+            verified.add("lockfile")
+        except _AttestError as exc:
+            _reason(exc.reason)
+        except Exception:
+            _reason(R_LOCKFILE_MISMATCH)
+        if lockfile_bytes is not None:
+            try:
+                self._attest_provider_pin(spec, lockfile_bytes)
+                verified.add("provider_pin")
+            except _AttestError as exc:
+                _reason(exc.reason)
+            except Exception:
+                _reason(R_PROVIDER_PIN_MISMATCH)
 
         mirror_abs: str | None = None
         try:
@@ -597,6 +646,72 @@ class RealToolchainVerifier:
         )
 
         return ToolchainVerification(verified=frozenset(verified), reasons=tuple(reasons))
+
+    def measure(self, *, rendered_workspace_hash: str):
+        """What this worker's toolchain actually IS. Takes no profile, on purpose.
+
+        :func:`~secp_api.provisioning_execution_authority.authorize_provisioning_execution` compares
+        an ``ObservedToolchain`` against the profile's pins. That comparison is only meaningful if
+        the two sides come from different places, so this method is given no expected value to read
+        and no way to consult one: every field is read off the trusted root's own bytes.
+
+        The single exception is ``rendered_workspace_hash``, which is a fact about the workspace the
+        renderer produced rather than about the toolchain, and is therefore supplied by the caller
+        that rendered it. It is carried here rather than measured because the workspace is ephemeral
+        and lives outside the trusted root this layout describes.
+
+        Raises :class:`ToolchainMeasurementError` with a bounded reason code. It does NOT return a
+        partially-filled record: empty fields would compare unequal and refuse, which is safe, but
+        would send an operator to re-pin a profile when the real problem is an unreadable mirror.
+        """
+        from secp_api.provisioning_execution_authority import ObservedToolchain
+
+        try:
+            root = _validate_root(self._layout.trusted_root)
+
+            exec_path = _safe_resolve(root, self._layout.executable)
+            binary_digest, _ = _hash_regular_file(
+                exec_path, max_bytes=_MAX_EXECUTABLE_BYTES, require_exec=True
+            )
+
+            version_raw = _read_small_file(
+                _safe_resolve(root, self._layout.version_metadata),
+                max_bytes=_MAX_VERSION_META_BYTES,
+            )
+            try:
+                version_meta = json.loads(version_raw)
+            except (ValueError, UnicodeDecodeError):
+                raise _AttestError(R_VERSION_MISMATCH) from None
+            if not isinstance(version_meta, dict) or set(version_meta) != {"opentofu_version"}:
+                raise _AttestError(R_VERSION_MISMATCH)
+            opentofu_version = str(version_meta["opentofu_version"])
+
+            lockfile_bytes = _read_small_file(
+                _safe_resolve(root, self._layout.provider_lockfile), max_bytes=_MAX_LOCKFILE_BYTES
+            )
+            if not lockfile_bytes:
+                raise _AttestError(R_LOCKFILE_MISMATCH)
+            lockfile_digest = "sha256:" + hashlib.sha256(lockfile_bytes).hexdigest()
+            address, provider_version, dirhash = self._read_provider_pin(lockfile_bytes)
+
+            mirror_identity, count = _hash_tree(_safe_resolve(root, self._layout.provider_mirror))
+            if count == 0:
+                raise _AttestError(R_MIRROR_MISMATCH)
+        except _AttestError as exc:
+            raise ToolchainMeasurementError(exc.reason) from None
+        except Exception:
+            raise ToolchainMeasurementError(R_OBJECT_TYPE_INVALID) from None
+
+        return ObservedToolchain(
+            opentofu_version=opentofu_version,
+            opentofu_binary_digest=binary_digest,
+            provider_source=address,
+            provider_version=provider_version,
+            provider_checksum=dirhash,
+            provider_lockfile_digest=lockfile_digest,
+            provider_mirror_identity=mirror_identity,
+            rendered_workspace_hash=rendered_workspace_hash,
+        )
 
     def safe_evidence(self, profile: dict) -> ToolchainAttestationEvidence:
         """Bounded, secret-free evidence projection (in-memory; not persisted in PR2)."""
@@ -670,14 +785,78 @@ class RealToolchainVerifier:
         if not hmac.compare_digest(tree_hash, spec.module_bundle_hash):
             raise _AttestError(R_MODULE_BUNDLE_MISMATCH)
 
-    def _attest_lockfile(self, root: str, spec) -> None:
+    def _attest_lockfile(self, root: str, spec) -> bytes:
+        """Verify the lockfile digest and RETURN the exact bytes that produced it.
+
+        The bytes are returned rather than the file re-opened for parsing, and that is the whole
+        point of the shape: hashing one read and parsing a second read verifies a digest over bytes
+        that are not necessarily the bytes the provider pin was checked against. One read, one
+        digest, one parse.
+        """
         _require_sha256(spec.provider_lockfile_hash)
         path = _safe_resolve(root, self._layout.provider_lockfile)
-        file_hash, size = _hash_regular_file(path, max_bytes=_MAX_LOCKFILE_BYTES)
-        if size == 0:
+        raw = _read_small_file(path, max_bytes=_MAX_LOCKFILE_BYTES)
+        if not raw:
             raise _AttestError(R_LOCKFILE_MISMATCH)
+        file_hash = "sha256:" + hashlib.sha256(raw).hexdigest()
         if not hmac.compare_digest(file_hash, spec.provider_lockfile_hash):
             raise _AttestError(R_LOCKFILE_MISMATCH)
+        return raw
+
+    @staticmethod
+    def _read_provider_pin(lockfile_bytes: bytes) -> tuple[str, str, str]:
+        """Read ``(address, version, h1_dirhash)`` out of a lockfile. Consults NO profile.
+
+        This is the measurement half, kept deliberately free of any expected value so that whatever
+        compares its result to a pin is performing a real comparison rather than restating the pin.
+        Both :meth:`_attest_provider_pin` and :meth:`measure` go through here.
+
+        Exactly ONE provider block and exactly ONE ``h1:`` dirhash are required. A lockfile carrying
+        a second provider is refused even when the authorized one is present and correct: ``tofu
+        init`` installs every provider the lockfile names, so an extra block is an extra binary
+        running against the cluster with nothing in the authority naming it. A block with two
+        ``h1:`` hashes has no single answer to "which artifact is this", and picking one would be
+        choosing on the operator's behalf.
+        """
+        try:
+            text = lockfile_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise _AttestError(R_PROVIDER_PIN_MISMATCH) from None
+
+        blocks = _LOCKFILE_PROVIDER_BLOCK_RE.findall(text)
+        if len(blocks) != 1:
+            raise _AttestError(R_PROVIDER_PIN_MISMATCH)
+        address, body = blocks[0]
+
+        version_match = _LOCKFILE_VERSION_RE.search(body)
+        if version_match is None:
+            raise _AttestError(R_PROVIDER_PIN_MISMATCH)
+
+        dirhashes = _LOCKFILE_H1_RE.findall(body)
+        if len(dirhashes) != 1:
+            raise _AttestError(R_PROVIDER_PIN_MISMATCH)
+
+        return address, version_match.group(1), dirhashes[0]
+
+    @classmethod
+    def _attest_provider_pin(cls, spec, lockfile_bytes: bytes) -> None:
+        """The lockfile must pin EXACTLY the authorized provider, version and artifact dirhash.
+
+        ``provider_lockfile_hash`` alone proves the lockfile is the reviewed lockfile; it says
+        nothing about what is *in* it, so a reviewed lockfile pinning a different provider than the
+        profile authorizes would pass. This compares the file's own content to the three profile
+        pins, which is what turns them from declarations into verified facts.
+        """
+        address, version, dirhash = cls._read_provider_pin(lockfile_bytes)
+        # Byte equality, with no suffix or prefix rule. ``ToolchainProfileSpec`` requires the
+        # fully-qualified form precisely so this can be an ``!=`` — a suffix match here would let
+        # ``registry.fake/evilbpg/proxmox`` satisfy a pin ending in ``bpg/proxmox``.
+        if (
+            address != spec.provider_source
+            or version != spec.provider_version
+            or dirhash != spec.provider_checksum
+        ):
+            raise _AttestError(R_PROVIDER_PIN_MISMATCH)
 
     def _attest_mirror(self, mirror_abs: str, spec) -> None:
         mirror = spec.provider_mirror
@@ -741,6 +920,9 @@ class RealToolchainVerifier:
             "binary_integrity": spec.binary_integrity,
             "module_bundle_id": spec.module_bundle_id,
             "module_bundle_hash": spec.module_bundle_hash,
+            "provider_source": spec.provider_source,
+            "provider_version": spec.provider_version,
+            "provider_checksum": spec.provider_checksum,
             "provider_lockfile_hash": spec.provider_lockfile_hash,
             "provider_mirror_identity": spec.provider_mirror.identity,
             "renderer_version": spec.renderer_version,

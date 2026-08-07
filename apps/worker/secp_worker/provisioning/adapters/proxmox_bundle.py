@@ -6,14 +6,19 @@ starts no process, imports no provider SDK, and contacts no Proxmox. Execution b
 existing :class:`~secp_worker.provisioning.opentofu.OpenTofuRunner`; this module deliberately adds
 no second runner.
 
-THE BUNDLE PINS ITS OWN PROVIDER, AND THE PROFILE PINS THE BUNDLE
------------------------------------------------------------------
-``ToolchainProfileSpec`` forbids extra fields and has no provider-source field — it pins
-``module_bundle_id`` and ``module_bundle_hash``. The provider requirement is therefore a property
-of the reviewed bundle itself, declared here in :data:`PROVIDER_SOURCE` / :data:`PROVIDER_VERSION`,
-and the profile binds which bundle is in play. :func:`render_bundle` refuses a profile whose
-``module_bundle_id`` is not this bundle, so a profile reviewed for different HCL cannot silently
-render these resources.
+THE BUNDLE AND THE PROFILE MUST AGREE ON THE PROVIDER
+------------------------------------------------------
+This bundle declares the provider it was reviewed against in :data:`PROVIDER_SOURCE` /
+:data:`PROVIDER_VERSION`, and the profile pins the same two values plus a checksum. Neither is
+redundant, because they are facts about different things: the bundle's constants are what this HCL
+was *written and reviewed* for, and the profile's pins are what the control plane *authorized this
+operation to install*. :func:`render_bundle` refuses when they disagree.
+
+That refusal is the seam that would otherwise stay open. Rendering against a profile pinning a
+different provider version produces HCL requiring one version while the authorized mirror artifact
+is another; ``tofu init`` would then either fail late, at the point where the operator has already
+approved a change set, or succeed against whichever artifact the mirror happened to hold. Checking
+at render time makes the disagreement a refusal before anything is hashed or approved.
 
 The source is written in its registry-less short form. The offline mirror is enforced by the
 runner's CLI flags, exactly as the pre-existing renderer documents; embedding a registry hostname
@@ -49,9 +54,17 @@ from secp_worker.provisioning.adapters.base import AdapterError
 #: refused — the same fail-closed posture the renderer already applies to ``renderer_version``.
 BUNDLE_ID = "secp-proxmox-range/bundle/v1"
 
-#: The provider this reviewed bundle targets, pinned to an exact version. Written registry-less;
-#: resolution comes from the pinned offline mirror.
+#: The provider this reviewed bundle targets, pinned to an exact version, in BOTH the forms that
+#: exist for it. They are not interchangeable and neither is derived from the other here:
+#:
+#: * :data:`PROVIDER_SOURCE` is what goes into ``required_providers`` — the registry-less short form
+#:   HCL uses. Rendering the fully-qualified address instead would put a registry hostname into a
+#:   generated artifact for no benefit, since resolution comes from the pinned offline mirror.
+#: * :data:`PROVIDER_ADDRESS` is what OpenTofu expands that to and records in the dependency
+#:   lockfile. It is the form the toolchain profile pins and the form every comparison downstream
+#:   uses, so that no step in the chain needs a rule for relating one form to the other.
 PROVIDER_SOURCE = "bpg/proxmox"
+PROVIDER_ADDRESS = "registry.opentofu.org/bpg/proxmox"
 PROVIDER_VERSION = "0.66.1"
 #: The local name the bundle refers to the provider by.
 PROVIDER_LOCAL_NAME = "proxmox"
@@ -137,6 +150,22 @@ def render_bundle(desired_state: dict, profile: dict) -> dict[str, str]:
     opentofu_version = str(profile.get("opentofu_version", ""))
     if not opentofu_version:
         raise AdapterError("toolchain profile does not pin an OpenTofu version")
+
+    # The profile's provider pins must be THIS bundle's provider. A missing pin is refused rather
+    # than defaulted to the bundle's own constant: defaulting would make the check pass by
+    # supplying the very value it was meant to compare against.
+    for field, expected in (
+        # The profile pins the lockfile form, so it is compared to PROVIDER_ADDRESS rather than to
+        # the short form this bundle renders into HCL.
+        ("provider_source", PROVIDER_ADDRESS),
+        ("provider_version", PROVIDER_VERSION),
+    ):
+        declared = str(profile.get(field, ""))
+        if declared != expected:
+            raise AdapterError(
+                f"toolchain profile pins {field} {declared!r} but this reviewed bundle "
+                f"targets {expected!r}; regenerate the plan with a matching profile"
+            )
 
     network = desired_state.get("network")
     if not isinstance(network, dict):
