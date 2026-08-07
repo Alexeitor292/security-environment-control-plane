@@ -428,8 +428,8 @@ jobs:
   # The normal shards already collect these modules, but they SKIP without a database. This additive
   # gate proves the durable enrollment repository, the transactional CAS/nonce concurrency suite, the
   # restart/crash recovery suite and the real migration round trip all EXECUTE against a real
-  # PostgreSQL, and that the live Alembic head is exactly a1d4f7c2e9b6. It runs only against the
-  # ephemeral job-local database and contacts no deployment infrastructure.
+  # PostgreSQL, and that the live Alembic head agrees with the repository's sole head. It runs only
+  # against the ephemeral job-local database and contacts no deployment infrastructure.
   backend-pr5h-postgres-enrollment:
     name: PR5H-A PostgreSQL enrollment/recovery fence (real DB, no skips)
     runs-on: ubuntu-latest
@@ -546,20 +546,63 @@ jobs:
               f"PR5H-A PostgreSQL proofs executed: {tests} tests, zero skipped/failed/errored."
           )
           PY
-      - name: Prove the live Alembic head is exactly a1d4f7c2e9b6
+      # The expected head is DERIVED from the migration graph, never written here. A revision
+      # literal in this file is a copy of a quantity that lives in the repository, and a copy that
+      # has to be edited by hand is one that eventually is not — this proof previously pinned a
+      # head that a later migration made stale, failing a correct change. Deriving it also makes
+      # this step strictly stronger than the literal version: it detects BRANCHING HEADS, which
+      # two agents on two branches each writing the same down_revision would otherwise produce,
+      # and which no other CI check can currently see.
+      - name: Prove the live Alembic head is the repository's sole head
         run: |
           uv run python - <<'PY'
           import os, sys
+          from alembic.config import Config
+          from alembic.script import ScriptDirectory
           from sqlalchemy import create_engine, text
-          url = os.environ["SECP_TEST_POSTGRES_URL"]
-          engine = create_engine(url, future=True)
+
+          from secp_api.worker_enrollment_schema import RUNTIME_REQUIRED_MIGRATION_HEAD
+
+          def fail(message: str) -> None:
+              print(f"::error::{message}")
+              sys.exit(1)
+
+          # 1-3. the migration graph must have exactly one head.
+          cfg = Config("apps/api/alembic.ini")
+          cfg.set_main_option("script_location", "apps/api/migrations")
+          heads = list(ScriptDirectory.from_config(cfg).get_heads())
+          if not heads:
+              fail("the Alembic migration graph has NO head; the revision chain is unreadable")
+          if len(heads) > 1:
+              fail(
+                  f"the Alembic migration graph has {len(heads)} heads {sorted(heads)}; the chain "
+                  "has BRANCHED and two migrations share a down_revision"
+              )
+
+          # 4-5. the runtime's required head must be that head, not a stale copy of an older one.
+          expected_head = heads[0]
+          if RUNTIME_REQUIRED_MIGRATION_HEAD != expected_head:
+              fail(
+                  f"RUNTIME_REQUIRED_MIGRATION_HEAD is {RUNTIME_REQUIRED_MIGRATION_HEAD!r} but the "
+                  f"migration graph head is {expected_head!r}; the code and the chain disagree"
+              )
+
+          # 6-8. the live database must be at exactly that head, in exactly one row.
+          engine = create_engine(os.environ["SECP_TEST_POSTGRES_URL"], future=True)
           with engine.connect() as conn:
               rows = conn.execute(text("SELECT version_num FROM alembic_version")).scalars().all()
           engine.dispose()
-          if rows != ["a1d4f7c2e9b6"]:
-              print(f"::error::live Alembic head is {rows}, expected exactly ['a1d4f7c2e9b6']")
-              sys.exit(1)
-          print("live Alembic head verified: a1d4f7c2e9b6")
+          if not rows:
+              fail("the live alembic_version table is EMPTY; no migration has been applied")
+          if len(rows) > 1:
+              fail(
+                  f"the live alembic_version table has {len(rows)} rows {sorted(rows)}; the "
+                  "database is at multiple heads"
+              )
+          if rows[0] != expected_head:
+              fail(f"live Alembic head is {rows[0]!r}, expected the sole head {expected_head!r}")
+
+          print(f"live Alembic head verified against the repository's sole head: {expected_head}")
           PY
 
   # --- PostgreSQL + real-socket API regression gate ---------------------------------------------
