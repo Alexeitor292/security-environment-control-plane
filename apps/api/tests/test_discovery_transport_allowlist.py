@@ -280,24 +280,20 @@ def test_an_unsafe_interpolated_segment_is_refused_at_the_transport(node):
 
 
 def test_a_query_the_type_did_not_declare_is_refused():
-    """Byte-identical, not "a subset of the allowed keys". An extra pair, a changed value and a
-    removed pair are all outside the grammar."""
-
-    class _ExtraQuery(GetVersionOperation):
-        pass
-
-    # A real type, mutated to return a query its class never declares.
+    """Byte-identical, not "a subset of the allowed keys". A query pair that a real operation type
+    never declares is refused even when the pair itself is legitimate for some OTHER type — the
+    grammar is per-operation, so ``?pending=1`` being valid somewhere does not make it valid here.
+    """
     operation = GetVersionOperation()
     for forged in (
-        (("pending", "1"),),
-        (("type", "vm"),),
+        (("pending", "1"),),  # valid on the SDN reads, not on /version
+        (("type", "vm"),),  # valid on /cluster/resources, not on /version
         (("node", "pve1"),),
         (("x", "y"), ("z", "w")),
     ):
         object.__setattr__(operation, "query_parameters", lambda forged=forged: forged)
         with pytest.raises(ProxmoxDiscoveryTransportError, match="query_outside_the_grammar"):
             _transport().execute(operation)
-    assert _ExtraQuery is not GetVersionOperation
 
 
 def test_a_declared_query_value_cannot_be_changed_by_a_caller():
