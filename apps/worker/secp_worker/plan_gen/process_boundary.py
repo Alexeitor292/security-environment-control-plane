@@ -7,8 +7,11 @@ reviewed PR5B activation flips it to ``False`` so the plan-only executor can be 
 production path — but ONLY through :func:`issue_plan_only_executor`, with an exact controlled-live
 capability, and ONLY after the shipped-disabled composition has been replaced by a separately
 reviewed deployment-local composition (the shipped default still refuses before any I/O). The
-generic subprocess seal (``_B1A_SUBPROCESS_SEALED``) and the apply/destroy seals stay ``True`` code
-constants, so a plan-only build can never apply or destroy.
+generic subprocess executor is a SEPARATE seam that ADR-030 reopened: it is production-capable, and
+what closes it is the durable operation authority plus a re-derived command grammar rather than the
+``_B1A_SUBPROCESS_SEALED`` constant this used to name. That is independent of the plan-only gate
+here, which still refuses without a controlled-live capability -- so a plan-only build can never
+apply or destroy for its own reasons, not because a constant elsewhere is ``True``.
 
 The plan-only command grammar (:func:`validate_plan_only_command`) is a pure validator: it admits
 only ``init`` (offline), a non-destroy ``plan``, and ``show -json`` against an exact transient plan
@@ -61,9 +64,9 @@ def plan_only_executor_implementation_digest() -> str:
 # attestation, rendering, resolver/secret contact, executor construction, or subprocess — until a
 # separately reviewed deployment-local composition is supplied out of band.
 #
-# The generic SubprocessProcessExecutor seal (_B1A_SUBPROCESS_SEALED) and the apply/destroy seals
-# are
-# INDEPENDENT constants that stay True, and the command grammar admits only init/non-destroy
+# The generic SubprocessProcessExecutor is an INDEPENDENT seam, reopened by ADR-030 and closed by
+# durable operation authority rather than by the constant this used to name; the apply/destroy seals
+# stay True. The plan-only command grammar admits only init/non-destroy
 # plan/show/validate/providers-schema — every one of those five reads, none writes infrastructure —
 # so a plan-only build can never apply or destroy.
 #

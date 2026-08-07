@@ -63,16 +63,22 @@ def test_an_empty_observation_set_is_not_vacuously_sealed():
 # --- the red direction: each seal made to fail on purpose -------------------------
 
 
-def test_the_executor_seal_fails_when_the_executor_can_be_constructed(monkeypatch):
-    """Unseal the real subprocess executor and the seal must report ``unsealed``.
+def test_the_executor_seal_fails_when_an_unauthorized_construction_succeeds(monkeypatch):
+    """Open the executor's authority check and the census must report ``unsealed``.
 
-    This is the case the old constant could not see: flip the guard inside ``__init__`` and the
-    boolean ``_B1A_SUBPROCESS_SEALED`` still reads True, so the payload still claimed sealed. Here
-    the surface is constructed for real, so the claim tracks the behaviour.
+    The property being observed changed with ADR-030. Construction succeeding is now EXPECTED --
+    the executor is production-capable -- so the red direction is no longer "make construction
+    work", it is "make construction work WITHOUT the durable authority". ``__init__`` is replaced
+    with one that accepts anything, which is exactly what a regression weakening the authority check
+    would look like, and the census has to see it.
+
+    Nothing runs: the probe only constructs, and the patched constructor does not execute either.
     """
-    from secp_worker.provisioning import process_executor
+    from secp_worker.provisioning.process_executor import SubprocessProcessExecutor
 
-    monkeypatch.setattr(process_executor, "_B1A_SUBPROCESS_SEALED", False)
+    monkeypatch.setattr(
+        SubprocessProcessExecutor, "__init__", lambda self, **kw: None, raising=True
+    )
     observations = {item.name: item for item in derive_seals()}
     seal = observations["generic_executor_subprocess_sealed"]
     assert seal.state is SealState.unsealed

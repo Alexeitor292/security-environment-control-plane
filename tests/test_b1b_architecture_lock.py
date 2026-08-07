@@ -133,7 +133,7 @@ def test_status_says_seals_and_read_only_status_unchanged():
 # --- both B1-A subprocess seals remain exactly True (code constants) ----------------------------
 
 
-def test_both_b1a_subprocess_seals_remain_true():
+def test_neither_retired_b1a_subprocess_seal_was_reintroduced():
     # Authoritative: the RUNTIME constant is exactly ``True`` in BOTH modules. This catches any
     # effective-False value regardless of formatting, aliasing (``= bool(0)`` / ``= 1 > 2``), or a
     # later reassignment — the module's final value is what governs the seal.
@@ -152,18 +152,16 @@ def test_both_b1a_subprocess_seals_remain_true():
     for seal in ("generic_executor_subprocess_sealed", "generic_activation_subprocess_sealed"):
         assert observed[seal].state is _ProbeSealState.sealed, seal
 
-    # Belt-and-suspenders: the seal is a SINGLE, top-level, literal ``= True`` code constant (not a
-    # computed expression, not reassigned) — so unsealing must be a deliberate reviewed edit.
+    # INVERTED by ADR-030. This required exactly one top-level ``_B1A_SUBPROCESS_SEALED = True`` in
+    # each module, so that unsealing had to be a deliberate reviewed edit. The constant is retired,
+    # so the same scan now requires NONE: what it catches is the constant being reintroduced under
+    # the old name, in either polarity, which is the regression that would restore a global
+    # "may execute" switch.
     for src in (PROCESS_EXECUTOR, ACTIVATION):
         text = src.read_text(encoding="utf-8")
         assigns = re.findall(r"(?m)^_B1A_SUBPROCESS_SEALED\s*=.*$", text)
-        assert len(assigns) == 1, (
-            f"{src.relative_to(REPO_ROOT)} must have exactly one top-level seal assignment; "
-            f"found {assigns}"
-        )
-        rhs = assigns[0].split("=", 1)[1].strip()
-        assert rhs == "True", (
-            f"{src.relative_to(REPO_ROOT)} seal must be the literal `True` (found {rhs!r})"
+        assert not assigns, (
+            f"{src.relative_to(REPO_ROOT)} reintroduces the retired seal constant: {assigns}"
         )
 
 
