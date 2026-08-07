@@ -124,10 +124,8 @@ def signed_snapshot(
         attestation=attestation,
         registration=ExpectedWorkerRegistration(
             worker_installation_id=DEFAULT_WORKER,
-            worker_role=DEFAULT_ROLE,
             worker_release_fingerprint=DEFAULT_RELEASE,
             verification_anchor_fingerprint=key_id_for(pub),
-            target_identity=target_identity,
             organization_identity=organization_identity,
         ),
         expected_operation_identity=operation_identity,

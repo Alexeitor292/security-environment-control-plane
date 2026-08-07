@@ -132,19 +132,46 @@ class DiscoverySnapshotBinding:
         return sha256_digest(self.canonical())
 
 
+#: The role a worker must claim to run Proxmox discovery. It is a property of the PROVIDER
+#: DISCOVERY CONTRACT, not of the worker's enrollment record, and this is a deliberate decision
+#: rather than a convenience.
+#:
+#: Worker enrollment storage is provider-neutral — machine-enforced, by
+#: ``tests/test_pr5h_architecture_guards.py`` and ``apps/management/tests/test_provider_neutrality``
+#: — so a ``worker_role`` column holding ``proxmox_privileged`` would put a Proxmox concept into
+#: exactly the tree that forbids one. Declaring it here instead means the expected role is not
+#: loadable, not configurable and not suppliable: there is no argument for it and no row that
+#: carries it, so a caller cannot make the claim agree with itself.
+REQUIRED_WORKER_ROLE = "proxmox_privileged"
+
+
 @dataclass(frozen=True)
 class ExpectedWorkerRegistration:
-    """The durable registration the control plane loads. NEVER built from the envelope."""
+    """The durable WORKER registration the control plane loads. NEVER built from the envelope.
+
+    Deliberately narrow: this record answers only "which worker, with which key, running which
+    release". It does not carry the target, and it does not carry the role.
+
+    * **The target is not here** because it comes from the durable authorized operation, which is a
+      different row with a different lifecycle. Carrying it in both places meant a caller supplying
+      a registration could contradict the operation, and the verifier already takes
+      ``expected_target_identity`` separately — so the field was a second, unreconciled source for
+      one fact. The old ``is_valid_for_target`` flag was the same problem wearing a boolean: it made
+      "this registration may be used against this target" something a constructor asserted rather
+      than something the loader established.
+    * **The role is not here** because it belongs to the provider discovery contract
+      (:data:`REQUIRED_WORKER_ROLE`) and enrollment storage is provider-neutral.
+
+    What remains are exactly the three facts the control plane durably knows about a worker, plus
+    the organization that scopes them.
+    """
 
     worker_installation_id: str
-    worker_role: str
     worker_release_fingerprint: str
     #: ``WorkerIdentityRegistration.verification_anchor_fingerprint``. The control plane stores only
     #: the fingerprint, so the envelope supplies the key and this is what it must derive.
     verification_anchor_fingerprint: str
-    target_identity: str
     organization_identity: str
-    is_valid_for_target: bool = True
 
 
 # --- the opaque authority
@@ -331,13 +358,10 @@ def verify_discovery_snapshot(
             _refused(SIGNATURE_NO_REGISTERED_ANCHOR, ("discovery_verification_anchor_missing",)),
             None,
         )
-    if not registration.is_valid_for_target:
-        return (
-            _refused(
-                SIGNATURE_NO_REGISTERED_ANCHOR, ("discovery_registration_invalid_for_target",)
-            ),
-            None,
-        )
+    # There is no ``is_valid_for_target`` check here any more, and its absence is the point. It was
+    # a boolean a constructor asserted; whether a registration may be used against this operation's
+    # target is now established by the LOADER, which either produces a registration for the worker
+    # the authorized operation names or produces none at all.
 
     # 4. Signer identity, against the DURABLE anchor.
     if not isinstance(attestation, DetachedAttestation):
@@ -373,7 +397,10 @@ def verify_discovery_snapshot(
             binding.worker_installation_id,
             registration.worker_installation_id,
         ),
-        ("worker_role", binding.worker_role, registration.worker_role),
+        # Against the CONTRACT CONSTANT, not against a loaded or supplied value. There is no
+        # expected-role argument and no column holding one, so the claim has nothing to agree with
+        # except the reviewed constant.
+        ("worker_role", binding.worker_role, REQUIRED_WORKER_ROLE),
         (
             "worker_release",
             binding.worker_release_fingerprint,

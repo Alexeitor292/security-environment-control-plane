@@ -97,10 +97,8 @@ def _binding(pub: str, **overrides) -> DiscoverySnapshotBinding:
 def _registration(pub: str, **overrides) -> ExpectedWorkerRegistration:
     base = dict(
         worker_installation_id="wk-1",
-        worker_role="proxmox_privileged",
         worker_release_fingerprint="sha256:" + "r" * 64,
         verification_anchor_fingerprint=key_id_for(pub),
-        target_identity=TARGET,
         organization_identity=ORG,
     )
     base.update(overrides)
@@ -245,12 +243,65 @@ def test_a_registration_with_no_anchor_fails_closed():
     assert authority is None
 
 
-def test_a_registration_invalid_for_this_target_fails_closed():
-    binding, attestation, registration = _good()
-    projection, _ = _verify(
-        binding, attestation, dataclasses.replace(registration, is_valid_for_target=False)
-    )
-    assert projection.signature == SIGNATURE_NO_REGISTERED_ANCHOR
+def test_the_registration_cannot_express_a_target_or_a_validity_claim():
+    """This replaces a test of ``is_valid_for_target``, and the replacement is the stronger one.
+
+    That field made "this registration may be used against this target" something a CONSTRUCTOR
+    asserted — a boolean any caller could set to True — while the verifier separately took
+    ``expected_target_identity``. Two sources for one fact, and the weaker one was a keyword
+    argument. It is now established by ``discovery_authority_loader``, which either produces a
+    registration for the worker the authorized operation names or produces none.
+
+    So the property to pin is that the fields are not expressible at all: a removal that left the
+    dataclass accepting them would silently restore the hole.
+    """
+    fields = {f.name for f in dataclasses.fields(ExpectedWorkerRegistration)}
+    assert fields == {
+        "worker_installation_id",
+        "worker_release_fingerprint",
+        "verification_anchor_fingerprint",
+        "organization_identity",
+    }
+    for removed in ("target_identity", "is_valid_for_target", "worker_role"):
+        assert removed not in fields, removed
+        with pytest.raises(TypeError):
+            ExpectedWorkerRegistration(
+                worker_installation_id="wk-1",
+                worker_release_fingerprint="sha256:" + "r" * 64,
+                verification_anchor_fingerprint="sha256:" + "k" * 64,
+                organization_identity=ORG,
+                **{removed: "anything"},
+            )
+
+
+def test_the_target_binding_is_still_checked_after_the_field_was_removed():
+    """Removing a redundant source must not remove the check. The target still has to match — it
+    now comes only from ``expected_target_identity``, which the loader fills from the durable
+    operation."""
+    priv, pub = _keys()
+    binding = _binding(pub, target_identity="target-other")
+    projection, authority = _verify(binding, _sign(priv, binding), _registration(pub))
+    assert "discovery_binding_mismatch:target" in projection.reasons
+    assert authority is None
+
+
+def test_the_expected_role_comes_from_the_contract_and_not_from_a_caller():
+    """There is no expected-role argument and no field holding one, so a worker claiming the wrong
+    role cannot be made to agree by supplying a matching expectation."""
+    import inspect
+
+    from secp_api.discovery_verification import REQUIRED_WORKER_ROLE
+
+    assert REQUIRED_WORKER_ROLE == "proxmox_privileged"
+    params = set(inspect.signature(verify_discovery_snapshot).parameters)
+    for banned in ("expected_worker_role", "worker_role", "expected_role", "required_worker_role"):
+        assert banned not in params, banned
+
+    priv, pub = _keys()
+    binding = _binding(pub, worker_role="ordinary")
+    projection, authority = _verify(binding, _sign(priv, binding), _registration(pub))
+    assert "discovery_binding_mismatch:worker_role" in projection.reasons
+    assert authority is None
 
 
 def test_an_envelope_self_signed_by_an_unregistered_key_refuses():

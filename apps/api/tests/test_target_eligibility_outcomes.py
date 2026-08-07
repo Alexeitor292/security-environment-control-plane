@@ -99,10 +99,8 @@ def _binding(pub: str, **overrides) -> DiscoverySnapshotBinding:
 def _registration(pub: str, **overrides) -> ExpectedWorkerRegistration:
     base = dict(
         worker_installation_id="wk-1",
-        worker_role="proxmox_privileged",
         worker_release_fingerprint="sha256:" + "r" * 64,
         verification_anchor_fingerprint=key_id_for(pub),
-        target_identity=TARGET,
         organization_identity=ORG,
     )
     base.update(overrides)

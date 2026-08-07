@@ -777,10 +777,8 @@ def test_the_signed_binding_verifies_against_the_registered_anchor_end_to_end():
     result, _target, _r, _f, _s, pub = _run()
     registration = ExpectedWorkerRegistration(
         worker_installation_id=WORKER,
-        worker_role=ROLE,
         worker_release_fingerprint=RELEASE,
         verification_anchor_fingerprint=key_id_for(pub),
-        target_identity=str(TARGET_ID),
         organization_identity=str(ORG),
     )
     projection, authority = verify_discovery_snapshot(
@@ -808,10 +806,8 @@ def test_a_refused_sdn_root_read_refuses_compilation_through_the_verifier():
     result, _target, _r, _f, _s, pub = _run(payloads=_cluster_payloads(sdn_root_denied=True))
     registration = ExpectedWorkerRegistration(
         worker_installation_id=WORKER,
-        worker_role=ROLE,
         worker_release_fingerprint=RELEASE,
         verification_anchor_fingerprint=key_id_for(pub),
-        target_identity=str(TARGET_ID),
         organization_identity=str(ORG),
     )
     projection, authority = verify_discovery_snapshot(
