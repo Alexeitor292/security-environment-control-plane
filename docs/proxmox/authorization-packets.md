@@ -17,8 +17,8 @@ pinned to 9.1.x specifically — the two items that sit closest to the 9.1 bound
 
 `pvesh` refuses to run as a non-root uid **before any ACL is consulted**:
 `PVE/CLI/pvesh.pm` calls `setup_default_cli_env()` with no username; `PVE/RESTEnvironment.pm` then
-does `$username //= 'root@pam'` followed by
-`die "please run as root\n" if ($username eq 'root@pam') && ($> != 0)`.
+defaults the username to the PAM-realm superuser authid and dies unless the process euid is 0. The
+check is a string compare against that one authid, so no ACL grant can satisfy it.
 
 SECP creates its probe account as `useradd --system --create-home --shell /usr/sbin/nologin`
 (`discovery_bootstrap_contract.py:306`) and the wrapper runs `exec pvesh get …` bare, with no `sudo`
@@ -86,12 +86,18 @@ answer; it is an unknown one.
 
 **This is a Proxmox configuration mutation and requires explicit approval.**
 
+**The concrete values are deliberately not written here.** `docs/proxmox/*.md` is guarded against
+concrete infrastructure values — a numeric port, an authorization-header scheme, a realm account —
+and a guard that is true of eleven documents and waived for the twelfth is not a guard. So this
+packet carries the SHAPE of the credential and placeholders for the identifiers; the exact strings
+belong in code an operator can print, which is where the next PR in this stack puts them.
+
 | | |
 | --- | --- |
-| Backing user | `secpdisc@pve` (a dedicated PVE-realm user, no shell, no SSH) |
+| Backing user | `<discovery-user>` — a dedicated realm user, no shell, no SSH, never a superuser |
 | Role name | `SECPDiscoveryReadOnly` |
 | Privilege set | `Sys.Audit`, `VM.Audit`, `Datastore.Audit`, `SDN.Audit` — and nothing else |
-| Token id | `secpdisc@pve!discovery` |
+| Token id | `<discovery-user>!<token-name>` |
 | Privilege separation | `privsep=1` |
 | ACL path | `/` |
 | Propagation | `1` |
@@ -104,9 +110,12 @@ at `/sdn` would **replace**, not union with, the role inherited from `/` for eve
 This is a decision, not a fact — it should be confirmed by the S1/S2 preflight before being relied
 on.
 
-**Privilege set is derived, not chosen.** It is computed from the required-fact table
-(`discovery_required_facts.py`), so the grant is exactly what the required facts need. A test
-asserts no write-class privilege appears anywhere in that table.
+**Privilege set should be derived, not chosen — and on this branch it is not yet.** The four
+privileges above are the ones the planned required-fact table needs, but that table and the code
+that computes the grant from it do not exist on this branch: they arrive later in the stack, along
+with the renderer that prints the exact commands and a test asserting no write-class privilege can
+reach them. Until then, treat the list above as a hand-written proposal — which is exactly the thing
+that drifts, and always drifts toward asking for more.
 
 **Explicitly NOT granted:** `Sys.Modify`, `VM.Allocate`, `VM.Config.*`, `VM.PowerMgmt`,
 `Datastore.Allocate`, `SDN.Allocate`, `Permissions.Modify`, `Realm.*`, `User.Modify`, or any
@@ -120,29 +129,34 @@ corresponding index response, so they are dropped rather than accommodated.
 
 ### Exact commands (NOT executed)
 
+Five `pveum` commands, in this order and with the placeholders above substituted:
+
 ```bash
-pveum user add secpdisc@pve --comment "SECP read-only discovery"
+pveum user add <discovery-user> --comment "SECP read-only discovery"
 pveum role add SECPDiscoveryReadOnly --privs "Sys.Audit,VM.Audit,Datastore.Audit,SDN.Audit"
-pveum acl modify / --user secpdisc@pve --role SECPDiscoveryReadOnly --propagate 1
-pveum user token add secpdisc@pve discovery --privsep 1
-pveum acl modify / --tokens 'secpdisc@pve!discovery' --role SECPDiscoveryReadOnly --propagate 1
+pveum acl modify / --user <discovery-user> --role SECPDiscoveryReadOnly --propagate 1
+pveum user token add <discovery-user> <token-name> --privsep 1
+pveum acl modify / --tokens '<discovery-user>!<token-name>' --role SECPDiscoveryReadOnly --propagate 1
 ```
 
 The token needs **its own** ACL entry: under `privsep=1`, `roles` checks `$acl->{tokens}` before
 `$acl->{users}`, so a token with no entries of its own resolves to nothing. Effective permissions
 are then the **intersection** of the token's and the user's.
 
-> One caveat worth stating because it would silently defeat the design: the intersection is guarded
-> by `if ($username && $username ne 'root@pam')`. A privsep token backed by `root@pam` is **not**
-> intersected. That is why the backing user is a dedicated `secpdisc@pve`, never root.
+> One caveat worth stating because it would silently defeat the design: Proxmox skips the
+> intersection entirely when the backing user is the PAM-realm superuser. A privilege-separated
+> token backed by that account is **not** intersected. That is why the backing user must be a
+> dedicated, purpose-made realm user, never the superuser.
 
 ### Rollback (NOT executed)
 
+Reversed in the order that leaves nothing orphaned — the token before the user that owns it:
+
 ```bash
-pveum user token remove secpdisc@pve discovery
-pveum acl delete / --tokens 'secpdisc@pve!discovery' --role SECPDiscoveryReadOnly
-pveum acl delete / --user secpdisc@pve --role SECPDiscoveryReadOnly
-pveum user delete secpdisc@pve
+pveum user token remove <discovery-user> <token-name>
+pveum acl delete / --tokens '<discovery-user>!<token-name>' --role SECPDiscoveryReadOnly
+pveum acl delete / --user <discovery-user> --role SECPDiscoveryReadOnly
+pveum user delete <discovery-user>
 pveum role delete SECPDiscoveryReadOnly
 ```
 
@@ -160,9 +174,9 @@ the preflight, not assumed** — S1 and S2 must agree before any index result is
 
 | | |
 | --- | --- |
-| API authority | `https://<enrolled target host>:8006/api2/json` — host and port come from the enrolled `ExecutionTarget`, never from a caller |
+| API authority | `<enrolled-target-host>:<api-port>` plus the `/api2/json` base path — host and port come from the enrolled `ExecutionTarget`, never from a caller |
 | TLS | pinned deployment-local CA bundle. **Not** ambient system trust |
-| Auth header | `Authorization: PVEAPIToken=secpdisc@pve!discovery=<uuid>` |
+| Auth header | Proxmox's API-token authorization scheme, carrying `<token-id>=<secret>`; the secret is never logged, chained into an exception, or written anywhere |
 | Credential | opaque `vault:` reference resolved **only** inside the privileged worker |
 | CSRF | not required — token auth short-circuits the check for every method, and GET never needs it |
 | Connect / read timeout | bounded, from `hardened_http` |
