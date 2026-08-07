@@ -181,7 +181,7 @@ describe("the distinctions the contract draws survive to the caller", () => {
     };
     vi.spyOn(api, "listTeardownEvidence").mockResolvedValue([evidence] as never);
 
-    const [record] = await liveReader.listEvidence("rng-1");
+    const [record] = await liveReader.listTeardownEvidence("rng-1");
 
     expect(record.unproven_count).toBe(1);
     expect(record.still_present).toBe(0);

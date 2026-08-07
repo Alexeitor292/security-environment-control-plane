@@ -71,7 +71,8 @@ describe("the facts this analysis exists to get right", () => {
   });
 
   it("reaches teardown evidence, because ranges are enumerable", () => {
-    // This is what makes `listEvidence` a frontend selection step and NOT a backend gap.
+    // This is what makes `listTeardownEvidence` a frontend selection step and NOT a backend gap.
+    // The ARTIFACT INDEX, which used to share that name, is a backend gap and a capability one.
     expect(reachability.isReachable("/api/v1/ranges/{range_id}/teardown-evidence")).toBe(true);
   });
 

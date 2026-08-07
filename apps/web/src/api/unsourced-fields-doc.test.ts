@@ -69,7 +69,7 @@ describe("docs/product/absent-endpoints.md", () => {
       .map((m) => m.method)
       .filter((m) => m !== "listSecretRefs")
       .sort();
-    // `listEvidence` and `listApprovals` are `shaped` — served, but only under a parent the
+    // `listTeardownEvidence` and `listApprovals` are `shaped` — served, but only under a parent the
     // screen is trying to discover — so they are specified without being unserved.
     for (const method of unserved) {
       expect(specified, `${method} has no specification`).toContain(method);
