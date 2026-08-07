@@ -251,12 +251,12 @@ def test_the_builder_fixes_the_purpose_and_refuses_an_unbound_worker():
 
 
 def test_the_request_cannot_be_constructed_directly():
-    from secp_worker.preflight.secret_resolution import TrustedDiscoveryResolutionRequest
+    from secp_worker.preflight.secret_resolution import TrustedProxmoxResolutionRequest
 
     _request, contract = _resolution()
     assert contract is not None
     with pytest.raises(TypeError, match="worker-constructed only"):
-        TrustedDiscoveryResolutionRequest(contract, token=object())
+        TrustedProxmoxResolutionRequest(contract, token=object())
 
 
 # === no key or signature may arrive from orchestration ============================================

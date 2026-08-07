@@ -363,12 +363,20 @@ def _prepare_transport(
     it and producing a signature nobody can use.
     """
     from secp_worker.preflight.secret_resolution import (
+        ResolutionPurpose,
         SecretResolutionError,
-        assert_discovery_resolution_authorized,
+        assert_proxmox_resolution_authorized,
     )
 
     try:
-        assert_discovery_resolution_authorized(resolution_request, resolution_expectation)
+        assert_proxmox_resolution_authorized(
+            resolution_request,
+            resolution_expectation,
+            # The composition is the DISCOVERY run. Naming the purpose here rather than letting the
+            # request declare it is what stops a provider-execution credential being resolved by a
+            # read-only path that happens to accept a self-consistent pair.
+            required_purpose=ResolutionPurpose.proxmox_readonly_discovery,
+        )
         material = resolver.resolve(resolution_request, expectation=resolution_expectation, now=now)
     except SecretResolutionError as exc:
         return str(getattr(exc, "reason_code", "credential_unavailable"))

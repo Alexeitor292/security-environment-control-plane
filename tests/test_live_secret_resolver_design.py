@@ -263,12 +263,19 @@ def test_shipped_default_resolver_remains_sealed_and_constructs_no_material():
     # default and constructs material only after the full plan-execution contract passes with an
     # injected concrete client; the assertions below hold it to the same fail-closed shape.
     plan_resolver = REPO / "apps/worker/secp_worker/plan_gen/openbao_plan_resolver.py"
-    allowed = {adapter, canary, plan_resolver}
+    # SECP-M1: the Proxmox operation resolver, added DELIBERATELY and held to the identical shape.
+    # It is the same class of thing as the two resolvers above -- a reviewed adapter whose only
+    # construction of SecretMaterial sits behind ``if self._client is None:`` -- and it is on this
+    # list because a fourth file quietly constructing credentials is exactly what this guard is
+    # for. It reads through the plan resolver's OpenBao client rather than a backend of its own.
+    proxmox_resolver = REPO / "apps/worker/secp_worker/preflight/proxmox_secret_resolver.py"
+    allowed = {adapter, canary, plan_resolver, proxmox_resolver}
 
     offenders: list[str] = []
     adapter_constructs = False
     canary_constructs = False
     plan_resolver_constructs = False
+    proxmox_resolver_constructs = False
     for path in _py(WORKER_PKG) + _py(API_PKG):
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
             if isinstance(node, ast.Call):
@@ -281,10 +288,12 @@ def test_shipped_default_resolver_remains_sealed_and_constructs_no_material():
                         canary_constructs = True
                     elif path == plan_resolver:
                         plan_resolver_constructs = True
+                    elif path == proxmox_resolver:
+                        proxmox_resolver_constructs = True
                     else:
                         offenders.append(str(path.relative_to(REPO)))
     assert not offenders, f"non-adapter production code constructs SecretMaterial: {offenders}"
-    assert allowed  # the allowlist is exactly these three files
+    assert len(allowed) == 4  # the allowlist is exactly these four files
 
     # The adapter's construction sits behind the fail-closed client boundary.
     adapter_src = adapter.read_text(encoding="utf-8")
@@ -297,6 +306,13 @@ def test_shipped_default_resolver_remains_sealed_and_constructs_no_material():
     assert plan_resolver_constructs
     assert "if self._client is None:" in plan_src
     assert "SecretMaterial(secret)" in plan_src
+
+    # And so does the Proxmox operation resolver's. Same assertion, not a weaker one: being newer
+    # is not a reason to hold it to less.
+    proxmox_src = proxmox_resolver.read_text(encoding="utf-8")
+    assert proxmox_resolver_constructs
+    assert "if self._client is None:" in proxmox_src
+    assert "SecretMaterial(secret)" in proxmox_src
 
     # The canary's construction is INERT: locally generated randomness only.
     assert canary_constructs

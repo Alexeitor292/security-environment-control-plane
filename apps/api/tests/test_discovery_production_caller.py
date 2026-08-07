@@ -238,8 +238,6 @@ def test_the_shipped_default_is_the_SEALED_resolver_and_not_merely_a_failing_one
     import inspect
     import pathlib
 
-    from secp_worker.preflight.secret_resolution import SealedDiscoveryCredentialResolver
-
     source = pathlib.Path(inspect.getfile(run_authorized_discovery)).read_text(encoding="utf-8")
     tree = ast.parse(source)
 
@@ -253,11 +251,21 @@ def test_the_shipped_default_is_the_SEALED_resolver_and_not_merely_a_failing_one
             assert isinstance(orelse, ast.Call), ast.dump(orelse)
             assert isinstance(orelse.func, ast.Name), ast.dump(orelse.func)
             defaults.append(orelse.func.id)
-    assert defaults == ["SealedDiscoveryCredentialResolver"], defaults
+    # The default is now the REAL resolver constructed with no backend client, rather than a class
+    # whose only behaviour is to fail. The shipped posture is identical -- it refuses before a
+    # socket -- but the reason changed from "there is no resolver" to "there is no backend", which
+    # is the honest one and the one an operator acts on after Authorization Packet 1.
+    assert defaults == ["_default_discovery_resolver"], defaults
 
-    # And the class it names is the one that always fails closed.
-    with pytest.raises(Exception, match="sealed default"):
-        SealedDiscoveryCredentialResolver().resolve(object(), expectation=object(), now=NOW)
+    # And what it builds is a real resolver, bound to the DISCOVERY purpose, with no client -- so
+    # it still fails closed, and it would refuse a provider-execution request even with one.
+    from secp_worker.preflight.proxmox_secret_resolver import ProxmoxOperationSecretResolver
+    from secp_worker.preflight.secret_resolution import ResolutionPurpose
+    from secp_worker.proxmox_discovery_runtime import _default_discovery_resolver
+
+    built = _default_discovery_resolver()
+    assert isinstance(built, ProxmoxOperationSecretResolver)
+    assert built.purpose is ResolutionPurpose.proxmox_readonly_discovery
 
 
 def test_an_unauthorized_operation_never_reaches_the_composition(

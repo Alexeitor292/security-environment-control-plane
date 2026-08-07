@@ -101,23 +101,39 @@ def _now() -> datetime:
 # --- Closed purpose catalog ---------------------------------------------------------------------
 
 
-def test_resolution_purpose_catalog_is_closed_and_readonly_only():
-    """Closed, and every member read-only. The list is exhaustive on purpose: a purpose added
-    without touching this test would be one nobody reviewed, and the catalog is the whole of what a
-    resolver may be asked to unlock."""
+def test_resolution_purpose_catalog_is_closed_and_separates_read_from_write():
+    """Closed and exhaustive: a purpose added without touching this test is one nobody reviewed.
+
+    RENAMED, because the old name said "readonly only" and that stopped being true. M1 needs a
+    credential that CAN mutate — OpenTofu and the typed operations must create an SDN object, a
+    bridge, a VM — and pretending otherwise would have meant either a write credential hiding under
+    a read-only name, or discovery's token quietly gaining apply authority.
+
+    So the invariant changes shape rather than weakening: it is no longer "no purpose names a
+    write", it is "read and write are DIFFERENT purposes, and the read ones still cannot write".
+    """
     assert [p.value for p in ResolutionPurpose] == [
         "readonly_staging_preflight",
         "proxmox_readonly_discovery",
+        "proxmox_provider_execution",
     ]
     assert SUPPORTED_PURPOSES == frozenset(
         {
             ResolutionPurpose.readonly_staging_preflight,
             ResolutionPurpose.proxmox_readonly_discovery,
+            ResolutionPurpose.proxmox_provider_execution,
         }
     )
-    # The property the closed catalog exists to protect: no purpose names a write.
-    for purpose in ResolutionPurpose:
-        assert "readonly" in purpose.value or "read_only" in purpose.value, purpose
+
+    # Exactly one member may mutate, and it is named for what it does rather than for a resource.
+    writers = {p for p in ResolutionPurpose if "readonly" not in p.value}
+    assert writers == {ResolutionPurpose.proxmox_provider_execution}
+
+    # Every other member still names a read, and none of them is a generic that could serve both.
+    for purpose in set(ResolutionPurpose) - writers:
+        assert "readonly" in purpose.value, purpose
+    for generic in ("proxmox", "proxmox_token", "proxmox_api", "http", "generic", "admin"):
+        assert generic not in {p.value for p in ResolutionPurpose}, generic
 
 
 # --- Contract gate: accepts a match, rejects every field mismatch --------------------------------
