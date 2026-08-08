@@ -77,9 +77,14 @@ class WorkerEnrollmentKeyPreparation:
         return {"key_id": self.key_id, "classification": self.classification}
 
 
-def _require_stat(st: FileStat | None, *, mode: int, reason: str) -> None:
+def require_protected_file_stat(st: FileStat | None, *, mode: int, reason: str) -> None:
     """Refuse anything that is not a plain, unlinked, root-owned file at the EXACT reviewed mode —
-    so a symlink, hardlink, device node, or a file another uid can rewrite is never trusted."""
+    so a symlink, hardlink, device node, or a file another uid can rewrite is never trusted.
+
+    Public because :mod:`secp_worker.worker_ownership` stores its document under this same root and
+    must be held to the identical contract. One checker with two callers; a second copy is how the
+    two drift and one of them ends up trusting a hardlink.
+    """
     if st is None:
         _reject(reason + "_missing")
     assert st is not None
@@ -97,10 +102,10 @@ def _decode_pair(fs: FilesystemBackend) -> tuple[str, str]:
     """Read + fully validate the fixed pair, returning ``(private_hex, public_hex)``. The private
     half is returned ONLY to the in-process signer construction below; it is never logged or
     surfaced. A pair whose public half does not derive from the private half fails closed."""
-    _require_stat(
+    require_protected_file_stat(
         fs.lstat(WORKER_ENROLLMENT_KEY_PATH), mode=_KEY_MODE, reason="enrollment_worker_key"
     )
-    _require_stat(
+    require_protected_file_stat(
         fs.lstat(WORKER_ENROLLMENT_PUBLIC_PATH),
         mode=_PUBLIC_MODE,
         reason="enrollment_worker_key_anchor",
@@ -274,6 +279,7 @@ __all__ = [
     "WORKER_ENROLLMENT_KEY_PATH",
     "WORKER_ENROLLMENT_PUBLIC_PATH",
     "WORKER_ENROLLMENT_ROOT",
+    "require_protected_file_stat",
     "LocalWorkerEnrollmentKeySeam",
     "WorkerEnrollmentKeyPreparation",
     "observe_local_worker_enrollment_key",

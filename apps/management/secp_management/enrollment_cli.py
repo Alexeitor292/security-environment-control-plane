@@ -147,21 +147,29 @@ class WorkerEnroller(Protocol):
     authenticates via worker proof-of-possession + the signed controller offer (NOT the operator
     OIDC token). Returns a bounded, secret-free outcome dict; refuses with a bounded reason code."""
 
-    def enroll(self, invitation: dict, *, now: str) -> dict: ...
+    def enroll(
+        self, invitation: dict, *, now: str, expected_controller_key_id: str | None = None
+    ) -> dict: ...
     def status(self, invitation: dict) -> dict: ...
-    def retry(self, invitation: dict, *, now: str) -> dict: ...
+    def retry(
+        self, invitation: dict, *, now: str, expected_controller_key_id: str | None = None
+    ) -> dict: ...
 
 
 class SealedWorkerEnroller:
     """The shipped default: no worker enrollment driver is wired; every attempt fails closed."""
 
-    def enroll(self, invitation: dict, *, now: str) -> dict:
+    def enroll(
+        self, invitation: dict, *, now: str, expected_controller_key_id: str | None = None
+    ) -> dict:
         _worker_reject("secpctl_worker_enroller_unavailable")
 
     def status(self, invitation: dict) -> dict:
         _worker_reject("secpctl_worker_enroller_unavailable")
 
-    def retry(self, invitation: dict, *, now: str) -> dict:
+    def retry(
+        self, invitation: dict, *, now: str, expected_controller_key_id: str | None = None
+    ) -> dict:
         _worker_reject("secpctl_worker_enroller_unavailable")
 
 
@@ -515,8 +523,30 @@ def _drive_worker(
         raise
 
 
+def _expected_controller_key_id(controller_trust_anchor_hex: str | None) -> str | None:
+    """Derive the operator-channel controller SIGNING key id, or ``None`` if none was supplied.
+
+    ``--controller-trust-anchor`` is a raw Ed25519 PUBLIC SIGNING key, not a TLS CA fingerprint —
+    the same value ``secpctl worker install`` already requires, derived with the same primitive so
+    the two paths cannot disagree about what a key id is. A malformed value yields ``None`` rather
+    than a fabricated id, and the driver then refuses an unowned worker for the honest reason.
+    """
+    if not controller_trust_anchor_hex or not controller_trust_anchor_hex.strip():
+        return None
+    from secp_commissioning.enrollment_attestation import key_id_for
+
+    try:
+        return key_id_for(controller_trust_anchor_hex.strip())
+    except Exception:  # noqa: BLE001 - a malformed anchor is "no independent identity supplied"
+        return None
+
+
 def worker_enroll(
-    deps: EnrollmentCliDeps, *, invitation_file: str, gate: WriteGate
+    deps: EnrollmentCliDeps,
+    *,
+    invitation_file: str,
+    gate: WriteGate,
+    controller_trust_anchor_hex: str | None = None,
 ) -> tuple[int, dict]:
     """``secpctl worker enroll`` — drive the worker exchange to healthy; dry-run unless
     --write --confirm. Uses ONLY worker PoP + the signed controller offer, never the operator
@@ -546,11 +576,59 @@ def worker_enroll(
         lambda inv: _worker_outcome(
             command,
             "written",
-            deps.worker_enroller.enroll(inv, now=deps.now()),
+            deps.worker_enroller.enroll(
+                inv,
+                now=deps.now(),
+                expected_controller_key_id=_expected_controller_key_id(controller_trust_anchor_hex),
+            ),
             controller_key_id=inv["controller_key_id"],
             exit_on_state=True,
         ),
     )
+
+
+def worker_ownership_reset(deps: EnrollmentCliDeps, *, gate: WriteGate) -> tuple[int, dict]:
+    """``secpctl worker ownership reset`` — release this worker so another plane may claim it.
+
+    LOCAL and privileged. It takes no invitation, no origin and no controller-supplied argument, and
+    it makes no network request: the only transfer mechanism for an owned worker is a person with
+    root on the worker deciding so. A controller able to release a worker it does not own would be
+    the hijack the ownership binding exists to prevent.
+
+    Destructive, so it is dry-run unless ``--write --confirm``. It removes the binding, clears the
+    retry hints and rotates the dedicated enrollment key — and deliberately touches NO Proxmox
+    resource, because worker ownership and infrastructure ownership are different authority domains.
+    """
+    command = "worker ownership reset"
+    from secp_commissioning.runtime import RealFilesystem
+    from secp_worker.worker_ownership import load_worker_ownership, reset_worker_ownership
+
+    fs = RealFilesystem()
+    try:
+        if not gate.is_write:
+            owner = load_worker_ownership(fs)
+            return EXIT_OK, {
+                "command": command,
+                "mode": "dry_run",
+                "owned": owner is not None,
+                "controller_installation_id": (
+                    owner.controller_installation_id if owner is not None else ""
+                ),
+            }
+        # `gate.is_write` is already `write AND confirm`, so both gates are proven set here.
+        outcome = reset_worker_ownership(fs, write=True, confirm=True)
+    except Exception as exc:  # noqa: BLE001 - bounded reason codes only
+        reason = getattr(exc, "reason_code", None)
+        if isinstance(reason, str):
+            return _refused(command, reason)
+        raise
+    return EXIT_OK, {
+        "command": command,
+        "mode": "written",
+        "ownership_removed": outcome.ownership_removed,
+        "retry_hints_cleared": outcome.retry_hints_cleared,
+        "enrollment_key_rotated": outcome.enrollment_key_rotated,
+    }
 
 
 def worker_status(deps: EnrollmentCliDeps, *, invitation_file: str) -> tuple[int, dict]:
@@ -565,7 +643,11 @@ def worker_status(deps: EnrollmentCliDeps, *, invitation_file: str) -> tuple[int
 
 
 def worker_retry(
-    deps: EnrollmentCliDeps, *, invitation_file: str, gate: WriteGate
+    deps: EnrollmentCliDeps,
+    *,
+    invitation_file: str,
+    gate: WriteGate,
+    controller_trust_anchor_hex: str | None = None,
 ) -> tuple[int, dict]:
     """``secpctl worker enrollment retry`` — resume-safe re-drive; dry-run unless --write --confirm.
     The controller treats an exact retry as idempotent."""
@@ -582,7 +664,11 @@ def worker_retry(
         lambda inv: _worker_outcome(
             command,
             "written",
-            deps.worker_enroller.retry(inv, now=deps.now()),
+            deps.worker_enroller.retry(
+                inv,
+                now=deps.now(),
+                expected_controller_key_id=_expected_controller_key_id(controller_trust_anchor_hex),
+            ),
             exit_on_state=True,
         ),
     )

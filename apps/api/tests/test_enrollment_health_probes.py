@@ -642,8 +642,14 @@ class _FakeController:
         return 200, {"enrollment": {"state": "healthy", "revision": 5}}
 
 
-def _drive(fs: InMemoryFilesystem) -> tuple[dict, dict]:
-    priv, pub = generate_keypair()
+def _drive(fs: InMemoryFilesystem, *, controller_keypair=None) -> tuple[dict, dict]:
+    """Drive one enrollment over the composed leaves.
+
+    ``controller_keypair`` is threaded so a caller can drive TWICE AS THE SAME CONTROLLER. It used
+    to generate a fresh pair per call, which made "a restarted worker" silently a DIFFERENT
+    controller — invisible before the ownership binding existed, and now correctly refused by it.
+    """
+    priv, pub = controller_keypair if controller_keypair is not None else generate_keypair()
     invitation = _invitation(controller_key_id=ea.key_id_for(pub))
     key_seam = LocalWorkerEnrollmentKeySeam(fs, write=True, confirm=True)
     store = DurableWorkerEnrollmentStateStore(fs)
@@ -662,11 +668,15 @@ def _drive(fs: InMemoryFilesystem) -> tuple[dict, dict]:
         key_seam=key_seam,
         transport_factory=transport_factory,
         state_store=store,
+        # the SAME hardened filesystem the leaves already compose over — which is exactly how
+        # production wires it, so this composition test exercises the real shape
+        ownership_store=fs,
         health_observer=LocalWorkerHealthObserver(
             LocalWorkerHealthProbes(invitation=invitation, fs=fs, state_store=store)
         ),
     )
-    outcome = driver.enroll(invitation, now=NOW)
+    # the independent first-contact fact, from the operator channel rather than the invitation
+    outcome = driver.enroll(invitation, now=NOW, expected_controller_key_id=ea.key_id_for(pub))
     return (
         {"state": outcome.state, "revision": outcome.revision, "resumed": outcome.already_healthy},
         controllers[0].health_evidence or {},
@@ -689,13 +699,38 @@ def test_a_second_run_resumes_from_the_durable_marker_with_the_same_key():
     fs = InMemoryFilesystem()
     _seed_host(fs)
 
-    first, _ = _drive(fs)
+    # THE SAME controller across both runs — a restart, not a different control plane.
+    controller = generate_keypair()
+
+    first, _ = _drive(fs, controller_keypair=controller)
     first_key = LocalWorkerEnrollmentKeySeam(fs).load_or_create().worker_key_id
-    second, _ = _drive(fs)  # a RESTARTED worker over the same host state
+    second, _ = _drive(fs, controller_keypair=controller)  # a RESTARTED worker, same host state
 
     assert first["resumed"] is False
     assert second["resumed"] is True  # the durable marker is what makes the resume observable
     assert LocalWorkerEnrollmentKeySeam(fs).load_or_create().worker_key_id == first_key
+    # and the exact-same-owner re-drive is idempotent rather than a second binding
+    from secp_worker.worker_ownership import load_worker_ownership
+
+    owner = load_worker_ownership(fs)
+    assert owner is not None
+    assert owner.binding_generation == 1
+
+
+def test_a_second_run_by_a_DIFFERENT_controller_is_refused_before_network():
+    """The write-once property, discovered by this suite rather than asserted into it.
+
+    Before the ownership binding existed, `_drive` generated a fresh controller keypair per call and
+    nothing noticed that "a restarted worker" was actually a different control plane. It is refused
+    now, and refused at the gate — so the second controller receives no proof of possession.
+    """
+    fs = InMemoryFilesystem()
+    _seed_host(fs)
+    _drive(fs, controller_keypair=generate_keypair())
+
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        _drive(fs, controller_keypair=generate_keypair())
+    assert ei.value.reason_code == "enrollment_ownership_controller_key_mismatch"
 
 
 def test_an_unprepared_host_refuses_locally_and_submits_no_result():

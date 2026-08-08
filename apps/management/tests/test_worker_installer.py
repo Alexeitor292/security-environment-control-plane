@@ -94,7 +94,8 @@ class FakeEnroller:
         self._raises = raises
         self.called = 0
 
-    def enroll(self, invitation: dict, *, now: str) -> dict:
+    def enroll(self, invitation: dict, *, now: str, expected_controller_key_id=None) -> dict:
+        self.expected_controller_key_id = expected_controller_key_id
         self.called += 1
         if self._raises is not None:
             raise self._raises

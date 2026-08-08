@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import NoReturn, Protocol
+from typing import TYPE_CHECKING, NoReturn, Protocol
 
 from secp_commissioning.canonical import is_sha256_digest
 from secp_commissioning.enrollment_attestation import (
@@ -44,6 +44,11 @@ from secp_worker.enrollment_http_transport import (
     SealedEnrollmentTransport,
     WorkerEnrollmentSigner,
 )
+
+if TYPE_CHECKING:  # type-only, so the worker package keeps its lazy-import posture
+    from secp_commissioning.runtime import FilesystemBackend
+
+    from secp_worker.worker_ownership import WorkerControllerOwnership
 
 _MAX_ATTEMPTS = 3
 _STEP_OFFER_VERIFIED = "offer_verified"
@@ -262,6 +267,7 @@ class WorkerEnrollmentDriver:
         "_state_store",
         "_health_observer",
         "_max_attempts",
+        "_ownership_store",
     )
 
     def __init__(
@@ -277,6 +283,10 @@ class WorkerEnrollmentDriver:
         state_store: WorkerEnrollmentStateStore | None = None,
         health_observer: WorkerEnrollmentHealthObserver | None = None,
         max_attempts: int = _MAX_ATTEMPTS,
+        # The hardened filesystem the durable ownership document lives on. `None` is NOT "unowned"
+        # — the gate refuses without it, because a driver that cannot read the binding must not act
+        # as though there is none.
+        ownership_store: FilesystemBackend | None = None,
     ) -> None:
         self._key_seam = key_seam or SealedWorkerEnrollmentKeySeam()
         self._transport_factory = transport_factory
@@ -285,12 +295,37 @@ class WorkerEnrollmentDriver:
         self._state_store = state_store or SealedWorkerEnrollmentStateStore()
         self._health_observer = health_observer or SealedWorkerEnrollmentHealthObserver()
         self._max_attempts = max(1, max_attempts)
+        self._ownership_store = ownership_store
 
     def __repr__(self) -> str:
         return "WorkerEnrollmentDriver(<redacted>)"
 
-    def enroll(self, invitation: EnrollmentInvitationInputs, *, now: str) -> DriverOutcome:
+    def enroll(
+        self,
+        invitation: EnrollmentInvitationInputs,
+        *,
+        now: str,
+        expected_controller_key_id: str | None = None,
+    ) -> DriverOutcome:
+        """Drive one enrollment. Ownership is settled BEFORE the first packet leaves this host.
+
+        ``expected_controller_key_id`` is the independent first-contact trust fact for an UNOWNED
+        worker: the controller's enrollment-key fingerprint, obtained by a local administrator from
+        an authenticated SECP surface and supplied here out of band. It is public material, so the
+        point is provenance rather than secrecy — it must not come from the invitation, whose whole
+        contents an attacker who can substitute it also chooses.
+
+        Adding one more value to the invitation would have been self-authentication: the invitation
+        already carries the controller origin, the controller key id AND the TLS CA, so an attacker
+        who supplies all three supplies a coherent identity that TLS and signature checks then
+        correctly authenticate. The only fix is a fact that did not travel with the invitation.
+        """
         _validate_invitation(invitation, now=now)
+        # BEFORE the transport exists and before any packet leaves: does this invitation belong to
+        # the controller that owns this worker, or — if unowned — to the one an administrator
+        # independently named? A refusal here means an attacker controlling another valid SECP
+        # installation never even receives a proof-of-possession attempt from an owned worker.
+        owner = self._ownership_gate(invitation, expected_controller_key_id)
         # C3: the local marker is only a RETRY HINT — it is NEVER trusted as the outcome. The driver
         # always re-drives the idempotent exchange and RECONCILES against the controller's
         # AUTHORITATIVE reported state/revision; a revoked / refused / recovery-required / advanced
@@ -307,6 +342,10 @@ class WorkerEnrollmentDriver:
         _status, bind_body = self._retry(lambda: transport.submit_binding(invitation))
         offer = _require_offer(bind_body)
         offer_claim, offer_att = self._verify_offer(invitation, signer.worker_key_id, offer)
+        # Bind ownership from the VERIFIED offer claim, not from the invitation. The claim is what
+        # the controller's key actually signed; the invitation is what an attacker would have
+        # supplied. They agree here only because `_verify_offer` just proved they must.
+        owner = self._bind_ownership(owner, offer_claim, signer.worker_key_id)
         self._state_store.record(invitation.enrollment_id, _STEP_OFFER_VERIFIED)
 
         # OBSERVE (never fabricate) the health evidence from actual bounded local observations. A
@@ -348,6 +387,93 @@ class WorkerEnrollmentDriver:
             revision=revision,
             already_healthy=(prior_marker == _STEP_HEALTHY and state == _STEP_HEALTHY),
         )
+
+    def _ownership_gate(
+        self,
+        invitation: EnrollmentInvitationInputs,
+        expected_controller_key_id: str | None,
+    ) -> WorkerControllerOwnership | None:
+        """Settle ownership before any network contact. Returns the current owner, or ``None``.
+
+        Two paths, and neither can be reached from the other:
+
+        * **Owned.** Every identity in the invitation must equal the pinned one. A mismatch refuses
+          here — not after a handshake, and not after this worker has signed anything — so a
+          hostile controller learns nothing and receives no proof of possession.
+        * **Unowned.** An independently-supplied ``expected_controller_key_id`` is REQUIRED, and the
+          invitation's controller key must equal it. With neither, the worker has no fact by which
+          to tell a real controller from an attacker-supplied one, and enrolling anyway is the
+          hijack this gate exists to prevent — so it refuses rather than proceeding hopefully.
+
+        A CORRUPT ownership document raises out of :func:`load_worker_ownership` rather than
+        reading as unowned. That direction matters: the opposite would make "damage the file" a
+        remote worker-claim primitive.
+        """
+        from secp_worker.worker_ownership import load_worker_ownership
+
+        store = self._ownership_store
+        if store is None:
+            # No ownership seam wired: the driver cannot prove who owns this worker, so it must not
+            # act as though nobody does. The shipped composition supplies the real store.
+            _reject("enrollment_ownership_store_unavailable")
+        owner = load_worker_ownership(store)
+
+        if owner is None:
+            if not expected_controller_key_id or not expected_controller_key_id.strip():
+                _reject("enrollment_ownership_expected_controller_required")
+            if expected_controller_key_id != invitation.controller_key_id:
+                _reject("enrollment_ownership_expected_controller_mismatch")
+            return None
+
+        # An owned worker ignores `expected_controller_key_id` entirely rather than letting it
+        # override the pin: a locally-supplied value must never be able to re-point an owned worker,
+        # or the local flag becomes the transfer mechanism the reset is supposed to be.
+        if invitation.controller_installation_id != owner.controller_installation_id:
+            _reject("enrollment_ownership_controller_installation_mismatch")
+        if invitation.controller_key_id != owner.controller_key_id:
+            _reject("enrollment_ownership_controller_key_mismatch")
+        if invitation.controller_origin != owner.controller_origin:
+            _reject("enrollment_ownership_controller_origin_mismatch")
+        return owner
+
+    def _bind_ownership(
+        self,
+        owner: WorkerControllerOwnership | None,
+        offer_claim: dict,
+        worker_key_id: str,
+    ) -> WorkerControllerOwnership:
+        """Persist the owner, or prove the existing one still holds. Never best-effort.
+
+        Runs AFTER the offer signature verifies and BEFORE the worker reports healthy. If the write
+        fails the enrollment refuses, because a controller must never regard a privileged worker as
+        healthy while the worker failed to remember who owns it — that is precisely the state a
+        later hijack needs.
+
+        Writing before the final acknowledgement is deliberate. If the acknowledgement then fails,
+        the SAME controller retries and `install_worker_ownership` is idempotent for an identical
+        record; a DIFFERENT controller meets an owned worker and is refused at the gate. The
+        interrupted state is therefore useless to an attacker, which is not true the other way
+        round.
+        """
+        from secp_worker.worker_ownership import (
+            WorkerControllerOwnership,
+            install_worker_ownership,
+        )
+
+        candidate = WorkerControllerOwnership(
+            controller_installation_id=str(offer_claim["controller_installation_id"]),
+            controller_key_id=str(offer_claim["controller_key_id"]),
+            controller_origin=str(offer_claim["controller_origin"]),
+            worker_key_id=worker_key_id,
+            binding_generation=owner.binding_generation if owner is not None else 1,
+        )
+        if owner is not None and not owner.matches(candidate):
+            # The gate already compared the invitation; this compares what was actually SIGNED.
+            _reject("enrollment_ownership_signed_offer_mismatch")
+        store = self._ownership_store
+        if store is None:  # pragma: no cover - the gate refuses first; re-narrowed for the checker
+            _reject("enrollment_ownership_store_unavailable")
+        return install_worker_ownership(store, candidate)
 
     def _retry(self, call: Callable[[], tuple[int, dict]]) -> tuple[int, dict]:
         """Send a request, re-sending the IDENTICAL call on a transient failure (transport error or

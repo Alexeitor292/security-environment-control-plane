@@ -296,7 +296,8 @@ class _StateEnroller:
     def __init__(self, state: str) -> None:
         self._state = state
 
-    def enroll(self, invitation, *, now):
+    def enroll(self, invitation, *, now, expected_controller_key_id=None):
+        self.expected_controller_key_id = expected_controller_key_id
         return {
             "enrollment_id": invitation["enrollment_id"],
             "state": self._state,
@@ -304,7 +305,8 @@ class _StateEnroller:
             "already_healthy": False,
         }
 
-    def retry(self, invitation, *, now):
+    def retry(self, invitation, *, now, expected_controller_key_id=None):
+        self.expected_controller_key_id = expected_controller_key_id
         return self.enroll(invitation, now=now)
 
     def status(self, invitation):

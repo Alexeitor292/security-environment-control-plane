@@ -69,9 +69,20 @@ class DriverWorkerEnroller:
         # gets the real per-invitation composition below
         self._driver_factory = driver_factory or self._build_driver
 
-    def enroll(self, invitation: dict, *, now: str) -> dict:
+    def enroll(
+        self, invitation: dict, *, now: str, expected_controller_key_id: str | None = None
+    ) -> dict:
+        """Drive one enrollment.
+
+        ``expected_controller_key_id`` is the INDEPENDENT first-contact trust fact an unowned worker
+        requires — derived by the caller from the operator-channel controller trust anchor, never
+        from the invitation. It is passed through rather than derived here so this adapter cannot
+        become a second place that decides what the expected controller is.
+        """
         inputs = self._inputs(invitation)
-        outcome = self._driver_factory(inputs).enroll(inputs, now=now)
+        outcome = self._driver_factory(inputs).enroll(
+            inputs, now=now, expected_controller_key_id=expected_controller_key_id
+        )
         return {
             "enrollment_id": outcome.enrollment_id,
             "state": outcome.state,
@@ -79,9 +90,13 @@ class DriverWorkerEnroller:
             "already_healthy": outcome.already_healthy,
         }
 
-    def retry(self, invitation: dict, *, now: str) -> dict:
+    def retry(
+        self, invitation: dict, *, now: str, expected_controller_key_id: str | None = None
+    ) -> dict:
         # the driver is resume-safe + idempotent; a retry is an identical re-drive
-        return self.enroll(invitation, now=now)
+        return self.enroll(
+            invitation, now=now, expected_controller_key_id=expected_controller_key_id
+        )
 
     def status(self, invitation: dict) -> dict:
         # read-only: report the local restart-state marker; never drive or contact the controller.
@@ -113,6 +128,10 @@ class DriverWorkerEnroller:
             # per-invitation: the origin + CA chain are the validated invitation's own
             transport_factory=build_invitation_transport,
             state_store=self._state_store,
+            # The SAME hardened filesystem the protected key pair lives on. Passing it is what makes
+            # the ownership gate real in production: with no store the driver refuses outright, so a
+            # composition that forgot this cannot silently enroll without recording an owner.
+            ownership_store=self._fs,
             health_observer=LocalWorkerHealthObserver(
                 LocalWorkerHealthProbes(
                     invitation=inputs, fs=self._fs, state_store=self._state_store

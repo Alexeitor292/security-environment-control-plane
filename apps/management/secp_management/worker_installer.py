@@ -263,7 +263,9 @@ class WorkerEnroller(Protocol):
     :mod:`~secp_management.enrollment_cli`). Authenticated by proof-of-possession and the signed
     controller offer — never an operator token."""
 
-    def enroll(self, invitation: dict, *, now: str) -> dict: ...
+    def enroll(
+        self, invitation: dict, *, now: str, expected_controller_key_id: str | None = None
+    ) -> dict: ...
 
 
 class SealedWorkerEnroller:
@@ -273,7 +275,9 @@ class SealedWorkerEnroller:
     def __repr__(self) -> str:
         return "SealedWorkerEnroller(<sealed>)"
 
-    def enroll(self, invitation: dict, *, now: str) -> dict:
+    def enroll(
+        self, invitation: dict, *, now: str, expected_controller_key_id: str | None = None
+    ) -> dict:
         _reject("installer_worker_enroller_sealed")
 
 
@@ -428,7 +432,15 @@ def install(
     # left in that state, so the service is rolled back and the installation is a FAILURE. It is
     # never reported as a partial success to be finished later.
     try:
-        outcome = deps.enroller.enroll(invitation, now=deps.now())
+        # The operator's out-of-band anchor, carried through to the worker's ownership gate. It was
+        # already checked against the invitation at `_verify_controller_trust_anchor` above; passing
+        # it on is what makes that check SURVIVE the install as a durable owner binding, instead of
+        # protecting only this one run and then being forgotten.
+        outcome = deps.enroller.enroll(
+            invitation,
+            now=deps.now(),
+            expected_controller_key_id=_expected_controller_key_id(validated),
+        )
     except Exception as exc:
         _rollback(deps, service)
         reason = getattr(exc, "reason_code", None)
@@ -473,6 +485,19 @@ def _load_invitation(deps: InstallerDeps, path: str) -> dict:
         if not isinstance(invitation.get(key), str) or not invitation[key]:
             _reject("installer_invitation_unreadable")
     return invitation
+
+
+def _expected_controller_key_id(request: InstallationRequest) -> str:
+    """The operator-channel controller SIGNING key id.
+
+    ``controller_trust_anchor_hex`` is a raw Ed25519 PUBLIC SIGNING key — see ``_TRUST_ANCHOR_HEX``
+    and the ``key_id_for`` comparison below. It is deliberately NOT a TLS CA fingerprint, despite
+    the field name, and the two must never be interchanged: one authenticates who signed the offer,
+    the other authenticates who terminated the connection.
+    """
+    from secp_commissioning.enrollment_attestation import key_id_for
+
+    return key_id_for(request.controller_trust_anchor_hex)
 
 
 def _verify_controller_trust_anchor(request: InstallationRequest, invitation: dict) -> None:

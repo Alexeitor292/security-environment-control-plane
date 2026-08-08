@@ -27,6 +27,7 @@ from secp_worker.enrollment_http_transport import (
     EnrollmentTransportError,
     WorkerEnrollmentSigner,
 )
+from secp_worker.enrollment_key import WORKER_ENROLLMENT_ROOT
 
 NOW = "2026-07-26T00:00:00+00:00"
 FUTURE = "2999-01-01T00:00:00+00:00"
@@ -206,11 +207,42 @@ class _KeySeam:
         return WorkerEnrollmentSigner(self._priv)
 
 
+def _ownership_fs():
+    """A REAL hardened in-memory filesystem, not a stub.
+
+    The ownership gate is fail-closed by design: a driver with no store refuses. Tests therefore
+    supply a store EXPLICITLY rather than the production default being loosened — there is no
+    `allow_unowned` switch and there must never be one.
+    """
+    from secp_commissioning.runtime import InMemoryFilesystem
+
+    fs = InMemoryFilesystem()
+    fs.makedir(WORKER_ENROLLMENT_ROOT, uid=0, gid=0, mode=0o700)
+    return fs
+
+
+def _expected(controller_pub: str) -> str:
+    """The independent first-contact trust fact an UNOWNED worker requires.
+
+    Derived from the controller's public key the test generated — i.e. from the operator channel,
+    NOT from the invitation. `test_the_first_contact_trust_fact_cannot_come_from_the_invitation`
+    asserts that distinction structurally.
+    """
+    return ea.key_id_for(controller_pub)
+
+
 def _driver(
-    controller_priv, controller_pub, *, state_store=None, health_observer=None, **fake_kw
+    controller_priv,
+    controller_pub,
+    *,
+    state_store=None,
+    health_observer=None,
+    ownership_store=None,
+    **fake_kw,
 ) -> WorkerEnrollmentDriver:
     wpriv, _wpub = generate_keypair()
     return WorkerEnrollmentDriver(
+        ownership_store=ownership_store if ownership_store is not None else _ownership_fs(),
         key_seam=_KeySeam(wpriv),
         transport_factory=lambda signer, _invitation: _FakeController(
             signer, controller_priv=controller_priv, controller_pub=controller_pub, **fake_kw
@@ -238,11 +270,12 @@ def test_the_transport_is_built_from_the_invitation_being_enrolled():
         return _FakeController(signer, controller_priv=cpriv, controller_pub=cpub)
 
     WorkerEnrollmentDriver(
+        ownership_store=_ownership_fs(),
         key_seam=_KeySeam(wpriv),
         transport_factory=factory,
         state_store=InMemoryWorkerEnrollmentStateStore(),
         health_observer=_FakeObserver(),
-    ).enroll(invitation, now=NOW)
+    ).enroll(invitation, now=NOW, expected_controller_key_id=_expected(cpub))
 
     assert seen == [invitation]
     assert seen[0].controller_ca_bundle_pem == CA_PEM
@@ -261,6 +294,7 @@ def test_two_enrollments_get_two_transports_and_never_share_one():
         return controller
 
     driver = WorkerEnrollmentDriver(
+        ownership_store=_ownership_fs(),
         key_seam=_KeySeam(wpriv),
         transport_factory=factory,
         state_store=InMemoryWorkerEnrollmentStateStore(),
@@ -268,8 +302,8 @@ def test_two_enrollments_get_two_transports_and_never_share_one():
     )
     first = _invitation(cpub)
     second = _invitation(cpub, enrollment_id="sha256:" + "3" * 64)
-    driver.enroll(first, now=NOW)
-    driver.enroll(second, now=NOW)
+    driver.enroll(first, now=NOW, expected_controller_key_id=_expected(cpub))
+    driver.enroll(second, now=NOW, expected_controller_key_id=_expected(cpub))
 
     assert [b[0] for b in built] == [first, second]
     assert built[0][1] is not built[1][1]  # never reused across invitations
@@ -284,6 +318,7 @@ def test_an_invitation_without_a_ca_chain_refuses_before_any_transport_is_built(
     built = []
 
     driver = WorkerEnrollmentDriver(
+        ownership_store=_ownership_fs(),
         key_seam=_KeySeam(wpriv),
         transport_factory=lambda s, i: (
             built.append(i) or _FakeController(s, controller_priv=cpriv, controller_pub=cpub)
@@ -293,7 +328,11 @@ def test_an_invitation_without_a_ca_chain_refuses_before_any_transport_is_built(
     )
 
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        driver.enroll(_invitation(cpub, controller_ca_bundle_pem="   "), now=NOW)
+        driver.enroll(
+            _invitation(cpub, controller_ca_bundle_pem="   "),
+            now=NOW,
+            expected_controller_key_id=_expected(cpub),
+        )
 
     assert ei.value.reason_code == "enrollment_invitation_ca_missing"
     assert built == []  # refused before anything was constructed
@@ -304,7 +343,9 @@ def test_an_invitation_without_a_ca_chain_refuses_before_any_transport_is_built(
 
 def test_driver_reaches_healthy_over_the_supported_exchange():
     cpriv, cpub = generate_keypair()
-    outcome = _driver(cpriv, cpub).enroll(_invitation(cpub), now=NOW)
+    outcome = _driver(cpriv, cpub).enroll(
+        _invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub)
+    )
     assert isinstance(outcome, DriverOutcome)
     assert outcome.state == "healthy" and outcome.revision == 5
     assert outcome.already_healthy is False
@@ -315,18 +356,21 @@ def test_driver_reaches_healthy_over_the_supported_exchange():
 
 def test_the_sealed_key_seam_default_fails_closed():
     cpriv, cpub = generate_keypair()
-    driver = WorkerEnrollmentDriver()  # both seams sealed
+    driver = WorkerEnrollmentDriver(ownership_store=_ownership_fs())  # both seams sealed
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        driver.enroll(_invitation(cpub), now=NOW)
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
     assert ei.value.reason_code == "enrollment_worker_key_sealed"
 
 
 def test_the_sealed_transport_default_fails_closed():
     wpriv, _ = generate_keypair()
     cpriv, cpub = generate_keypair()
-    driver = WorkerEnrollmentDriver(key_seam=_KeySeam(wpriv))  # sealed transport factory
+    driver = WorkerEnrollmentDriver(
+        ownership_store=_ownership_fs(),
+        key_seam=_KeySeam(wpriv),
+    )  # sealed transport factory
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        driver.enroll(_invitation(cpub), now=NOW)
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
     assert ei.value.reason_code == "enrollment_transport_not_activated"
 
 
@@ -338,7 +382,7 @@ def test_an_offer_signed_by_a_non_pinned_key_is_refused():
     other_priv, _ = generate_keypair()
     driver = _driver(cpriv, cpub, offer_signer_priv=other_priv)  # offer signed by the WRONG key
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        driver.enroll(_invitation(cpub), now=NOW)
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
     assert ei.value.reason_code == "enrollment_offer_signature_invalid"
 
 
@@ -348,7 +392,7 @@ def test_an_offer_bound_to_a_different_release_is_refused():
     # but the field pin against the invitation fails
     driver = _driver(cpriv, cpub, offer_field_override={"release_digest": "sha256:" + "9" * 64})
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        driver.enroll(_invitation(cpub), now=NOW)
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
     assert ei.value.reason_code == "enrollment_offer_binding_mismatch"
 
 
@@ -357,7 +401,9 @@ def test_an_offer_bound_to_a_different_release_is_refused():
 
 def test_a_transient_bind_failure_is_retried_then_succeeds():
     cpriv, cpub = generate_keypair()
-    outcome = _driver(cpriv, cpub, transient_binds=2).enroll(_invitation(cpub), now=NOW)
+    outcome = _driver(cpriv, cpub, transient_binds=2).enroll(
+        _invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub)
+    )
     assert outcome.state == "healthy"
 
 
@@ -365,7 +411,9 @@ def test_a_persistent_transport_failure_refuses_after_bounded_retries():
     cpriv, cpub = generate_keypair()
     outcome_driver = _driver(cpriv, cpub, transient_binds=99)  # always fails
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        outcome_driver.enroll(_invitation(cpub), now=NOW)
+        outcome_driver.enroll(
+            _invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub)
+        )
     assert ei.value.reason_code == "enrollment_transport_failed"
 
 
@@ -373,7 +421,7 @@ def test_a_4xx_result_is_refused_with_the_bounded_controller_code():
     cpriv, cpub = generate_keypair()
     driver = _driver(cpriv, cpub, result_status=422)
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        driver.enroll(_invitation(cpub), now=NOW)
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
     assert ei.value.reason_code == "enrollment_health_incomplete"
 
 
@@ -387,7 +435,7 @@ def test_resume_reconciles_healthy_from_the_controller_not_a_hard_coded_marker()
     driver = _driver(
         cpriv, cpub, state_store=store, result_enrollment={"state": "healthy", "revision": 7}
     )
-    outcome = driver.enroll(inv, now=NOW)
+    outcome = driver.enroll(inv, now=NOW, expected_controller_key_id=_expected(cpub))
     assert outcome.already_healthy is True
     assert outcome.state == "healthy" and outcome.revision == 7  # authoritative, not hard-coded 5
 
@@ -402,7 +450,7 @@ def test_resume_with_a_revoked_controller_state_is_never_reported_healthy():
     driver = _driver(
         cpriv, cpub, state_store=store, result_enrollment={"state": "refused", "revision": 6}
     )
-    outcome = driver.enroll(inv, now=NOW)
+    outcome = driver.enroll(inv, now=NOW, expected_controller_key_id=_expected(cpub))
     assert outcome.state == "refused" and outcome.revision == 6
     assert outcome.already_healthy is False
 
@@ -414,7 +462,7 @@ def test_the_sealed_health_observer_default_fails_closed():
     cpriv, cpub = generate_keypair()
     driver = _driver(cpriv, cpub, health_observer=SealedWorkerEnrollmentHealthObserver())
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        driver.enroll(_invitation(cpub), now=NOW)
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
     assert ei.value.reason_code == "enrollment_worker_health_observer_sealed"
 
 
@@ -424,7 +472,7 @@ def test_a_failed_observation_refuses_healthy_and_submits_nothing():
     checks["no_provider_contact"] = False  # one real observation failed
     driver = _driver(cpriv, cpub, health_observer=_FakeObserver(checks=checks))
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        driver.enroll(_invitation(cpub), now=NOW)
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
     assert ei.value.reason_code == "enrollment_worker_health_incomplete"
 
 
@@ -433,7 +481,7 @@ def test_the_observer_sees_the_exchange_context_and_returns_only_booleans():
     seen: list = []
     inv = _invitation(cpub)
     driver = _driver(cpriv, cpub, health_observer=_FakeObserver(seen=seen))
-    outcome = driver.enroll(inv, now=NOW)
+    outcome = driver.enroll(inv, now=NOW, expected_controller_key_id=_expected(cpub))
     assert outcome.state == "healthy"
     assert len(seen) == 1
     ctx = seen[0]
@@ -459,5 +507,5 @@ def test_an_expired_invitation_is_refused():
     driver = _driver(cpriv, cpub)
     inv = _invitation(cpub, expires_at="2000-01-01T00:00:00+00:00")
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        driver.enroll(inv, now=NOW)
+        driver.enroll(inv, now=NOW, expected_controller_key_id=_expected(cpub))
     assert ei.value.reason_code == "enrollment_invitation_expired"
