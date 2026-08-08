@@ -65,6 +65,7 @@ def _prepared_signer():
         controller_installation_id=INSTALL,
         controller_key_id=identity["key_id"],
         controller_trust_anchor_hex=identity["public_key_hex"],
+        controller_tls_trust_anchor_id="sha256:" + "7" * 64,
         controller_origin=ORIGIN,
         release_digest=RELEASE,
         management_identity_digest="sha256:" + "e" * 64,
@@ -79,6 +80,7 @@ def _context(identity, **over) -> AuthorizedControllerOfferContext:
     fields = dict(
         enrollment_id="sha256:" + "1" * 64,
         invitation_id="sha256:" + "2" * 64,
+        organization_id="11111111-1111-1111-1111-111111111111",
         controller_installation_id=INSTALL,
         controller_key_id=identity["key_id"],
         controller_origin=ORIGIN,
@@ -268,7 +270,25 @@ def test_the_broker_refuses_an_offer_that_fails_self_verification():
                 public_key_hex="0" * 64,
                 signature="0" * 128,
             )
-            return SignedControllerOffer(claim=claim, attestation=bad)
+            ownership_claim = ea.controller_ownership_claim(
+                organization_id=context.organization_id,
+                controller_installation_id=context.controller_installation_id,
+                controller_key_id=context.controller_key_id,
+                controller_origin=context.controller_origin,
+                controller_trust_anchor_id="sha256:" + "7" * 64,
+                worker_key_id=context.worker_key_id,
+                enrollment_id=context.enrollment_id,
+                invitation_id=context.invitation_id,
+                controller_transaction_id=context.controller_transaction_id,
+                release_digest=context.release_digest,
+                predecessor_digest=context.predecessor_digest,
+            )
+            return SignedControllerOffer(
+                claim=claim,
+                attestation=bad,
+                ownership_claim=ownership_claim,
+                ownership_attestation=bad,
+            )
 
     resp = _roundtrip(_broker(_TamperingSigner()), _request(_context(identity)))
     assert resp == {"error": "controller_enrollment_offer_self_verify_failed"}
@@ -313,12 +333,20 @@ def _identity_db(tmp_path, *, status="active", verified=1, rows=1):
     return engine
 
 
-def test_db_provider_leases_the_single_verified_active_identity(tmp_path):
+def test_db_provider_leases_the_single_verified_active_identity(tmp_path, monkeypatch):
+    import secp_management.enrollment_signer_identity as signer_identity
+
+    monkeypatch.setattr(
+        signer_identity,
+        "_observe_tls_trust_anchor_id",
+        lambda: "sha256:" + "7" * 64,
+    )
     provider = DbActiveControllerSigningIdentityProvider(_identity_db(tmp_path))
     with provider.lease() as lease:
         assert lease.controller_installation_id == INSTALL
         assert lease.controller_origin == ORIGIN
         assert lease.release_digest == RELEASE
+        assert lease.controller_tls_trust_anchor_id == "sha256:" + "7" * 64
         assert lease.enrollment_key_proof_id.startswith("enrkp:")
 
 

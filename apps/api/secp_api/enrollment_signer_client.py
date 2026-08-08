@@ -86,23 +86,41 @@ def _parse_offer_response(payload: object) -> SignedControllerOffer:
     """Reconstruct a :class:`SignedControllerOffer` from a broker response, or fail closed. A
     bounded broker ``{"error": ...}`` and any malformed/oversized/short response all collapse to
     ``enrollment_signer_unavailable`` — the broker's internal code is never surfaced."""
-    if not isinstance(payload, dict) or not isinstance(payload.get("offer"), dict):
+    if not isinstance(payload, dict):
         raise WorkerEnrollmentError(EC.signer_unavailable)
-    offer = payload["offer"]
-    claim = offer.get("claim")
-    att = offer.get("attestation")
-    if not isinstance(claim, dict) or not isinstance(att, dict):
-        raise WorkerEnrollmentError(EC.signer_unavailable)
-    try:
-        attestation = DetachedAttestation(
-            algorithm=att["algorithm"],
-            key_id=att["key_id"],
-            public_key_hex=att["public_key_hex"],
-            signature=att["signature"],
-        )
-    except (KeyError, TypeError):
-        raise WorkerEnrollmentError(EC.signer_unavailable) from None
-    return SignedControllerOffer(claim=claim, attestation=attestation)
+    # BOTH envelopes are required. A response carrying only the offer is a broker that did not sign
+    # ownership, and accepting it would silently drop the trust-anchor binding — the worker would
+    # then refuse, and the fault would look like a worker problem rather than a signer one.
+    parsed = []
+    for key in ("offer", "ownership"):
+        envelope = payload.get(key)
+        if not isinstance(envelope, dict):
+            raise WorkerEnrollmentError(EC.signer_unavailable)
+        claim = envelope.get("claim")
+        att = envelope.get("attestation")
+        if not isinstance(claim, dict) or not isinstance(att, dict):
+            raise WorkerEnrollmentError(EC.signer_unavailable)
+        try:
+            parsed.append(
+                (
+                    claim,
+                    DetachedAttestation(
+                        algorithm=att["algorithm"],
+                        key_id=att["key_id"],
+                        public_key_hex=att["public_key_hex"],
+                        signature=att["signature"],
+                    ),
+                )
+            )
+        except (KeyError, TypeError):
+            raise WorkerEnrollmentError(EC.signer_unavailable) from None
+    (claim, attestation), (ownership_claim, ownership_attestation) = parsed
+    return SignedControllerOffer(
+        claim=claim,
+        attestation=attestation,
+        ownership_claim=ownership_claim,
+        ownership_attestation=ownership_attestation,
+    )
 
 
 class UnixSocketEnrollmentOfferSignerClient(_NonSerializable):

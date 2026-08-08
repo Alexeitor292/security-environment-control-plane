@@ -49,6 +49,7 @@ def _lease(identity: dict[str, str], **over: str) -> SigningIdentityLease:
         controller_installation_id=INSTALL,
         controller_key_id=identity["key_id"],
         controller_trust_anchor_hex=identity["public_key_hex"],
+        controller_tls_trust_anchor_id="sha256:" + "7" * 64,
         controller_origin=ORIGIN,
         release_digest=RELEASE,
         management_identity_digest="sha256:" + "e" * 64,
@@ -82,6 +83,7 @@ def _ctx_fields(**over: str) -> dict[str, str]:
     fields = dict(
         enrollment_id="sha256:" + "1" * 64,
         invitation_id="sha256:" + "2" * 64,
+        organization_id="11111111-1111-1111-1111-111111111111",
         controller_installation_id=INSTALL,
         controller_key_id="sha256:" + "c" * 64,
         controller_origin=ORIGIN,

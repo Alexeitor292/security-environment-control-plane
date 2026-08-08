@@ -40,6 +40,7 @@ from secp_commissioning.controller_enrollment_signer import (
 from secp_commissioning.enrollment_attestation import (
     ENROLLMENT_ATTESTATION_DOMAIN,
     OFFER_KIND,
+    OWNERSHIP_KIND,
     AttestationError,
     claim_digest,
     verify_detached,
@@ -130,10 +131,9 @@ def read_peer_credentials(conn: object) -> PeerCredentials:
     return PeerCredentials(pid=pid, uid=uid, gid=gid)
 
 
-def _attestation_payload(offer: SignedControllerOffer) -> dict:
-    att = offer.attestation
+def _envelope(claim: dict, att) -> dict:  # noqa: ANN001 - DetachedAttestation, typed at the seam
     return {
-        "claim": offer.claim,
+        "claim": claim,
         "attestation": {
             "algorithm": att.algorithm,
             "key_id": att.key_id,
@@ -141,6 +141,14 @@ def _attestation_payload(offer: SignedControllerOffer) -> dict:
             "signature": att.signature,
         },
     }
+
+
+def _attestation_payload(offer: SignedControllerOffer) -> dict:
+    return _envelope(offer.claim, offer.attestation)
+
+
+def _ownership_payload(offer: SignedControllerOffer) -> dict:
+    return _envelope(offer.ownership_claim, offer.ownership_attestation)
 
 
 class EnrollmentSignerBroker:
@@ -172,7 +180,13 @@ class EnrollmentSignerBroker:
         try:
             self._peer_policy.authorize(self._peer_reader(conn))
             offer = self._sign_request(_recv_all(conn, self._max_request_bytes))
-            payload: dict = {"offer": _attestation_payload(offer)}
+            # Both envelopes travel together: they were minted under ONE held identity lease, and
+            # returning them separately would let a worker pair an offer from one live identity
+            # with an ownership claim from another.
+            payload: dict = {
+                "offer": _attestation_payload(offer),
+                "ownership": _ownership_payload(offer),
+            }
         except (EnrollmentSignerBrokerError, ControllerEnrollmentSignerError) as exc:
             payload = {"error": exc.reason_code}
         except Exception:  # noqa: BLE001 - any unexpected failure is a bounded closed refusal
@@ -206,18 +220,28 @@ class EnrollmentSignerBroker:
         return offer
 
     def _self_verify(self, offer: SignedControllerOffer) -> None:
-        try:
-            verify_detached(
-                offer.attestation,
-                expected_key_id=offer.claim["controller_key_id"],
-                domain=ENROLLMENT_ATTESTATION_DOMAIN,
-                kind=OFFER_KIND,
-                digest=claim_digest(offer.claim),
-            )
-        except (AttestationError, KeyError):
-            raise EnrollmentSignerBrokerError(
-                "controller_enrollment_offer_self_verify_failed"
-            ) from None
+        """Verify BOTH signatures the broker just produced, each under its own kind.
+
+        Verifying only the offer would let a malformed or mis-kinded ownership claim leave the
+        root process unchecked — and the worker refuses on it, so the failure would surface as an
+        enrollment that mysteriously never completes rather than as a signer fault here.
+        """
+        for attestation, kind, claim in (
+            (offer.attestation, OFFER_KIND, offer.claim),
+            (offer.ownership_attestation, OWNERSHIP_KIND, offer.ownership_claim),
+        ):
+            try:
+                verify_detached(
+                    attestation,
+                    expected_key_id=claim["controller_key_id"],
+                    domain=ENROLLMENT_ATTESTATION_DOMAIN,
+                    kind=kind,
+                    digest=claim_digest(claim),
+                )
+            except (AttestationError, KeyError):
+                raise EnrollmentSignerBrokerError(
+                    "controller_enrollment_offer_self_verify_failed"
+                ) from None
 
     def serve_forever(self, listener: object) -> None:  # pragma: no cover - production accept loop
         while True:

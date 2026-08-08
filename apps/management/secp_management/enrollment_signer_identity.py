@@ -24,6 +24,7 @@ exception.
 
 from __future__ import annotations
 
+import pathlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 
@@ -103,7 +104,13 @@ class DbActiveControllerSigningIdentityProvider:
                 raise ControllerEnrollmentSignerError("controller_enrollment_identity_unverified")
             # a malformed identity row can never yield a usable lease — SigningIdentityLease
             # construction proves every field's grammar and raises a bounded refusal otherwise.
+            # The TLS trust set this controller ACTUALLY serves with, read from its own root-owned
+            # bundle under the held lock — so what gets signed is what is live at sign time, not a
+            # cached snapshot. It is a FILESYSTEM fact, not a row, which is why it is read here
+            # rather than added to the identity table: the certificate a controller presents can be
+            # replaced without any database write.
             lease = SigningIdentityLease(
+                controller_tls_trust_anchor_id=_observe_tls_trust_anchor_id(),
                 row_id=str(row["id"]),
                 activation_token=f"{row['id']}|{row['activated_at']}",
                 controller_installation_id=str(row["controller_installation_id"]),
@@ -118,6 +125,35 @@ class DbActiveControllerSigningIdentityProvider:
             # the lock is held for the duration of the caller's `with` block — i.e. through signing
             # and the broker's self-verification — then the transaction closes deterministically.
             yield lease
+
+
+def _observe_tls_trust_anchor_id() -> str:
+    """The identity of the controller's live TLS trust set, or a bounded refusal.
+
+    Read at every lease acquisition rather than cached: a controller whose certificate bundle was
+    replaced must sign the NEW identity, or the worker would pin an anchor the controller no longer
+    serves and refuse every subsequent connection for a reason nobody could see.
+
+    An unreadable or malformed bundle refuses rather than yielding a placeholder. Signing a
+    fabricated anchor would be worse than not signing one: the worker would pin it and then compare
+    every future connection against something that was never real.
+    """
+    from secp_commissioning.trust_anchor import TrustAnchorError, trust_anchor_id_for
+
+    from secp_management.controller_tls import CONTROLLER_CA_BUNDLE_PATH
+
+    try:
+        pem = pathlib.Path(CONTROLLER_CA_BUNDLE_PATH).read_bytes()
+    except OSError:
+        raise ControllerEnrollmentSignerError(
+            "controller_enrollment_tls_trust_anchor_unavailable"
+        ) from None
+    try:
+        return trust_anchor_id_for(pem)
+    except TrustAnchorError:
+        raise ControllerEnrollmentSignerError(
+            "controller_enrollment_tls_trust_anchor_invalid"
+        ) from None
 
 
 __all__ = [
