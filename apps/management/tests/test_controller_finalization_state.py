@@ -106,6 +106,7 @@ def _lease(**overrides: str) -> SigningIdentityLease:
         "controller_installation_id": _INSTALLATION,
         "controller_key_id": _KEY_ID,
         "controller_trust_anchor_hex": _ANCHOR,
+        "controller_tls_trust_anchor_id": "sha256:" + "7" * 64,
         "controller_origin": _ORIGIN,
         "release_digest": _RELEASE,
         "management_identity_digest": _MGMT_DIGEST,

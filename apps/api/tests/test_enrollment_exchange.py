@@ -81,6 +81,7 @@ def _injected_signer(pub_hex: str, priv_hex: str) -> ControllerEnrollmentOfferSi
         controller_installation_id=INSTALL,
         controller_key_id=ea.key_id_for(pub_hex),
         controller_trust_anchor_hex=pub_hex,
+        controller_tls_trust_anchor_id="sha256:" + "7" * 64,
         controller_origin=DEV_ORIGIN,
         release_digest=RELEASE,
         management_identity_digest="sha256:" + "e" * 64,

@@ -41,9 +41,11 @@ from secp_commissioning.descriptor import scan_forbidden
 from secp_commissioning.enrollment_attestation import (
     ENROLLMENT_ATTESTATION_DOMAIN,
     OFFER_KIND,
+    OWNERSHIP_KIND,
     DetachedAttestation,
     claim_digest,
     controller_offer_claim,
+    controller_ownership_claim,
     enrollment_key_proof_id_for,
     key_id_for,
     sign_detached,
@@ -182,6 +184,7 @@ class AuthorizedControllerOfferContext:
 
     enrollment_id: str
     invitation_id: str
+    organization_id: str
     controller_installation_id: str
     controller_key_id: str
     controller_origin: str
@@ -194,6 +197,7 @@ class AuthorizedControllerOfferContext:
 
     def __post_init__(self) -> None:
         _v_digest(self.enrollment_id)
+        _v_bounded(self.organization_id)
         _v_digest(self.invitation_id)
         _v_installation(self.controller_installation_id)
         _v_digest(self.controller_key_id)
@@ -210,6 +214,7 @@ class AuthorizedControllerOfferContext:
                 {
                     "enrollment_id": self.enrollment_id,
                     "invitation_id": self.invitation_id,
+                    "organization_id": self.organization_id,
                     "controller_installation_id": self.controller_installation_id,
                     "controller_key_id": self.controller_key_id,
                     "controller_origin": self.controller_origin,
@@ -263,6 +268,11 @@ class SigningIdentityLease(_NonSerializable):
     controller_installation_id: str
     controller_key_id: str
     controller_trust_anchor_hex: str
+    #: The identity of the TLS trust set this controller actually serves with. DISTINCT from
+    #: ``controller_trust_anchor_hex`` above, which despite its name is the Ed25519 SIGNING key —
+    #: the two are both anchors and must never be interchanged, because one authenticates who
+    #: signed the offer and the other authenticates who terminated the connection.
+    controller_tls_trust_anchor_id: str
     controller_origin: str
     release_digest: str
     management_identity_digest: str
@@ -275,6 +285,7 @@ class SigningIdentityLease(_NonSerializable):
         _v_installation(self.controller_installation_id)
         _v_digest(self.controller_key_id)
         _v_anchor(self.controller_trust_anchor_hex)
+        _v_digest(self.controller_tls_trust_anchor_id)
         _v_origin(self.controller_origin)
         _v_digest(self.release_digest)
         _v_digest(self.management_identity_digest)
@@ -310,11 +321,23 @@ class SealedControllerEnrollmentSigner(_NonSerializable):
 
 @dataclass(frozen=True)
 class SignedControllerOffer:
-    """The controller-signed offer the worker verifies against the invitation's pinned controller
-    key: the canonical claim plus its detached Ed25519 attestation. No private material."""
+    """The controller-signed offer AND the controller-signed ownership claim.
+
+    Two claims, one signature each, under DIFFERENT attestation kinds. They travel together because
+    they are minted under the same held identity lease — signing them separately would allow a
+    worker to receive an offer for one live identity and an ownership claim for another.
+
+    The ownership claim binds what the offer cannot: the organization, and the identity of the TLS
+    trust set this controller actually serves with. That second field is what refuses a proxying
+    attacker who presents the real controller's key and swaps only the CA.
+
+    No private material in either.
+    """
 
     claim: dict[str, str]
     attestation: DetachedAttestation
+    ownership_claim: dict[str, str]
+    ownership_attestation: DetachedAttestation
 
 
 class ControllerEnrollmentOfferSigner(_NonSerializable):
@@ -389,7 +412,35 @@ class ControllerEnrollmentOfferSigner(_NonSerializable):
             kind=OFFER_KIND,
             digest=claim_digest(claim),
         )
-        return SignedControllerOffer(claim=claim, attestation=attestation)
+        # The ownership claim, under its OWN kind — so the offer's `/v1` signed bytes are untouched
+        # and neither signature can be presented as the other. Every identity here comes from the
+        # LEASE, not the context, exactly as the offer's do: the context is what the API assembled,
+        # the lease is what the controller currently IS.
+        ownership_claim = controller_ownership_claim(
+            organization_id=context.organization_id,
+            controller_installation_id=lease.controller_installation_id,
+            controller_key_id=lease.controller_key_id,
+            controller_origin=lease.controller_origin,
+            controller_trust_anchor_id=lease.controller_tls_trust_anchor_id,
+            worker_key_id=context.worker_key_id,
+            enrollment_id=context.enrollment_id,
+            invitation_id=context.invitation_id,
+            controller_transaction_id=context.controller_transaction_id,
+            release_digest=lease.release_digest,
+            predecessor_digest=context.predecessor_digest,
+        )
+        ownership_attestation = sign_detached(
+            private_hex,
+            domain=ENROLLMENT_ATTESTATION_DOMAIN,
+            kind=OWNERSHIP_KIND,
+            digest=claim_digest(ownership_claim),
+        )
+        return SignedControllerOffer(
+            claim=claim,
+            attestation=attestation,
+            ownership_claim=ownership_claim,
+            ownership_attestation=ownership_attestation,
+        )
 
 
 def _load_validated_key(fs: FilesystemBackend, lease: SigningIdentityLease) -> str:

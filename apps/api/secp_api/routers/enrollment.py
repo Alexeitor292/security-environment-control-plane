@@ -333,6 +333,7 @@ def bind_worker_exchange(
     _observe(outcome.status)
     return BindExchangeOut(
         signed_offer=SignedControllerOfferOut.model_validate(outcome.signed_offer),
+        signed_ownership=SignedControllerOfferOut.model_validate(outcome.signed_ownership),
         enrollment=EnrollmentStatusOut.model_validate(outcome.status),
     )
 

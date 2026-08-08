@@ -90,11 +90,25 @@ def test_parse_offer_response_reconstructs_a_signed_offer():
                 "public_key_hex": "0" * 64,
                 "signature": "0" * 128,
             },
-        }
+        },
+        "ownership": {
+            "claim": {
+                "schema": ea.OWNERSHIP_SCHEMA,
+                "controller_key_id": "sha256:" + "c" * 64,
+                "controller_trust_anchor_id": "sha256:" + "7" * 64,
+            },
+            "attestation": {
+                "algorithm": "Ed25519",
+                "key_id": "sha256:" + "c" * 64,
+                "public_key_hex": "0" * 64,
+                "signature": "0" * 128,
+            },
+        },
     }
     offer = _parse_offer_response(payload)
     assert offer.claim["schema"] == ea.OFFER_SCHEMA
     assert offer.attestation.algorithm == "Ed25519"
+    assert offer.ownership_claim["schema"] == ea.OWNERSHIP_SCHEMA
 
 
 @pytest.mark.parametrize(
@@ -103,6 +117,7 @@ def test_parse_offer_response_reconstructs_a_signed_offer():
         {"error": "controller_enrollment_offer_cross_key"},  # a bounded broker error
         {"error": "enrollment_signer_peer_unauthorized"},
         {"offer": {"claim": {}}},  # missing attestation
+        {"offer": {"claim": {}, "attestation": {}}, "ownership": {}},  # malformed ownership
         {"offer": {"attestation": {}, "claim": {}}},  # attestation missing fields
         "not-a-dict",
         {},
@@ -134,6 +149,7 @@ def _context_stub(**over) -> AuthorizedControllerOfferContext:
     fields = dict(
         enrollment_id="sha256:" + "1" * 64,
         invitation_id="sha256:" + "2" * 64,
+        organization_id="11111111-1111-1111-1111-111111111111",
         controller_installation_id=INSTALL,
         controller_key_id="sha256:" + "c" * 64,
         controller_origin=ORIGIN,
@@ -170,6 +186,7 @@ def test_client_and_broker_roundtrip_over_a_real_uds(tmp_path, monkeypatch):
         controller_installation_id=INSTALL,
         controller_key_id=identity["key_id"],
         controller_trust_anchor_hex=identity["public_key_hex"],
+        controller_tls_trust_anchor_id="sha256:" + "7" * 64,
         controller_origin=ORIGIN,
         release_digest=RELEASE,
         management_identity_digest="sha256:" + "e" * 64,

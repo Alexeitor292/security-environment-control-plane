@@ -4338,6 +4338,7 @@ export interface components {
         BindExchangeOut: {
             enrollment: components["schemas"]["EnrollmentStatusOut"];
             signed_offer: components["schemas"]["SignedControllerOfferOut"];
+            signed_ownership: components["schemas"]["SignedControllerOfferOut"];
         };
         /**
          * BindExchangeRequest

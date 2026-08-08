@@ -734,6 +734,11 @@ class ExchangeOutcome:
     retry."""
 
     signed_offer: dict[str, object]
+    #: The controller-signed OWNERSHIP claim, binding the organization and the TLS trust anchor the
+    #: worker must keep seeing. Carried alongside the offer because both were minted under one held
+    #: identity lease; a worker that received them from different leases could pin an anchor for a
+    #: controller identity that no longer signs.
+    signed_ownership: dict[str, object]
     status: dict[str, object]
     deduplicated: bool
 
@@ -828,12 +833,18 @@ def _replay_bind_record(
     if (
         not isinstance(response, dict)
         or not isinstance(response.get("signed_offer"), dict)
+        or not isinstance(response.get("signed_ownership"), dict)
         or not isinstance(response.get("enrollment"), dict)
     ):
+        # A persisted response missing the ownership envelope is CORRUPT, not a legacy shape to
+        # tolerate: replaying it would hand the worker an offer with no trust-anchor binding.
         raise WorkerEnrollmentError(EC.state_corrupt)
     # (6) return the EXACT original response/status (never the current head); no signer, no write
     return ExchangeOutcome(
-        signed_offer=response["signed_offer"], status=response["enrollment"], deduplicated=True
+        signed_offer=response["signed_offer"],
+        signed_ownership=response["signed_ownership"],
+        status=response["enrollment"],
+        deduplicated=True,
     )
 
 
@@ -965,6 +976,9 @@ def bind_worker_exchange(
     context = AuthorizedControllerOfferContext(
         enrollment_id=enrollment_id,
         invitation_id=invitation.invitation_id,
+        # From the LOCKED authoritative enrollment row, never from the request — the organization
+        # is one of the two facts the ownership claim binds that the offer claim does not.
+        organization_id=str(loaded.organization_id),
         controller_installation_id=invitation.controller_installation_id,
         controller_key_id=invitation.controller_key_id,
         controller_origin=invitation.controller_origin,
@@ -1018,8 +1032,16 @@ def bind_worker_exchange(
     # (8) persist the EXACT signed public offer WRITE-ONCE per enrollment (a lost race -> conflict),
     #     pinning the C2 winning-bind bindings + the EXACT original response so a retry is provable.
     envelope = _offer_envelope(offer_claim, offer.attestation)
+    ownership_envelope = _offer_envelope(offer.ownership_claim, offer.ownership_attestation)
     status_view = recorded.state.public_view()
-    response = {"signed_offer": envelope, "enrollment": status_view}
+    # `signed_ownership` is INSIDE the persisted response, not only in the return value. A bind
+    # retry replays these exact bytes, so anything left out here is silently dropped on every
+    # retry — and the worker, which requires the claim, would then refuse only on the retry path.
+    response = {
+        "signed_offer": envelope,
+        "signed_ownership": ownership_envelope,
+        "enrollment": status_view,
+    }
     try:
         repo.persist_signed_offer(
             session,
@@ -1038,7 +1060,12 @@ def bind_worker_exchange(
         )
     except RepositoryRefusal as exc:
         raise _surface(exc) from None
-    return ExchangeOutcome(signed_offer=envelope, status=status_view, deduplicated=False)
+    return ExchangeOutcome(
+        signed_offer=envelope,
+        signed_ownership=ownership_envelope,
+        status=status_view,
+        deduplicated=False,
+    )
 
 
 def record_offer(

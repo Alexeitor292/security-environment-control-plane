@@ -46,6 +46,17 @@ pytestmark = pytest.mark.skipif(
 _PROOF_ID = "enrkp:" + "a" * 64
 
 
+@pytest.fixture(autouse=True)
+def _stub_tls_trust_anchor_id(monkeypatch):
+    import secp_management.enrollment_signer_identity as signer_identity
+
+    monkeypatch.setattr(
+        signer_identity,
+        "_observe_tls_trust_anchor_id",
+        lambda: "sha256:" + "7" * 64,
+    )
+
+
 def _drop_role(conn) -> None:
     if conn.execute(
         text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": ENROLLMENT_SIGNER_DB_ROLE}

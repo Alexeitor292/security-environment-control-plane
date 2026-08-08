@@ -240,6 +240,7 @@ class BindExchangeOut(BaseModel):
     """The bind-exchange response: the internally-signed controller offer + the bounded status."""
 
     signed_offer: SignedControllerOfferOut
+    signed_ownership: SignedControllerOfferOut
     enrollment: EnrollmentStatusOut
 
 
