@@ -59,6 +59,7 @@ from secp_management.enrollment_cli import (
     enrollment_status,
     invite_create,
     worker_enroll,
+    worker_ownership_reset,
     worker_retry,
     worker_status,
 )
@@ -203,6 +204,14 @@ def _add_worker_parser(groups) -> None:
     enroll.add_argument(
         "--invitation", required=True, help="path to the non-secret invitation file"
     )
+    enroll.add_argument(
+        "--controller-trust-anchor",
+        help="the EXPECTED controller signing key (raw Ed25519 public key hex), obtained "
+        "out of band. An UNOWNED worker requires it: the invitation supplies the origin, "
+        "the key id AND the CA together, so a substituted invitation is internally "
+        "consistent and only a fact that did NOT travel with it can detect one. An "
+        "already-owned worker checks its pinned owner instead and ignores this.",
+    )
     _add_write_confirm(enroll)
 
     # ``install`` is the SUPPORTED single operation for a Proxmox-adjacent worker host: it installs
@@ -240,11 +249,28 @@ def _add_worker_parser(groups) -> None:
     enrollment = actions.add_parser(
         "enrollment", help="worker enrollment status/retry"
     ).add_subparsers(dest="worker_action", required=True)
+    ownership = actions.add_parser(
+        "ownership", help="worker controller-ownership operations (LOCAL only)"
+    ).add_subparsers(dest="worker_action", required=True)
+    wreset = ownership.add_parser(
+        "reset",
+        help="release this worker from its controller so another may claim it (LOCAL, destructive)",
+    )
+    _add_write_confirm(wreset)
+
     wst = enrollment.add_parser("status", help="read-only local reconciliation")
     wst.add_argument("--invitation", required=True, help="path to the non-secret invitation file")
     wretry = enrollment.add_parser("retry", help="resume-safe re-drive")
     wretry.add_argument(
         "--invitation", required=True, help="path to the non-secret invitation file"
+    )
+    wretry.add_argument(
+        "--controller-trust-anchor",
+        help="the EXPECTED controller signing key (raw Ed25519 public key hex), obtained "
+        "out of band. An UNOWNED worker requires it: the invitation supplies the origin, "
+        "the key id AND the CA together, so a substituted invitation is internally "
+        "consistent and only a fact that did NOT travel with it can detect one. An "
+        "already-owned worker checks its pinned owner instead and ignores this.",
     )
     _add_write_confirm(wretry)
 
@@ -349,11 +375,23 @@ def _dispatch_worker(args: argparse.Namespace, enr: EnrollmentCliDeps) -> tuple[
     if args.action == "install":
         return _dispatch_worker_install(args, enr)
     if args.action == "enroll":
-        return worker_enroll(enr, invitation_file=args.invitation, gate=_gate(args))
+        return worker_enroll(
+            enr,
+            invitation_file=args.invitation,
+            gate=_gate(args),
+            controller_trust_anchor_hex=args.controller_trust_anchor,
+        )
+    if args.action == "ownership" and args.worker_action == "reset":
+        return worker_ownership_reset(enr, gate=_gate(args))
     if args.action == "enrollment" and args.worker_action == "status":
         return worker_status(enr, invitation_file=args.invitation)
     if args.action == "enrollment" and args.worker_action == "retry":
-        return worker_retry(enr, invitation_file=args.invitation, gate=_gate(args))
+        return worker_retry(
+            enr,
+            invitation_file=args.invitation,
+            gate=_gate(args),
+            controller_trust_anchor_hex=args.controller_trust_anchor,
+        )
     return EXIT_REFUSED, {"command": "worker", "reason_code": "unknown_command"}
 
 

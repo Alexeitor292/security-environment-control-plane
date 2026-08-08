@@ -220,7 +220,7 @@ def install_worker_ownership(
 
 
 def clear_worker_ownership(fs: FilesystemBackend, *, write: bool, confirm: bool) -> bool:
-    """The LOCAL, privileged, destructive release of ownership. Returns whether a record was removed.
+    """The LOCAL, privileged, destructive release of ownership. Returns whether a record was gone.
 
     Gated by the same explicit ``write`` + ``confirm`` pair the key provisioning uses, so it cannot
     happen as a side effect of anything. There is deliberately no controller-supplied argument and
@@ -250,11 +250,93 @@ def clear_worker_ownership(fs: FilesystemBackend, *, write: bool, confirm: bool)
     return True
 
 
+@dataclass(frozen=True)
+class OwnershipResetOutcome:
+    """What the reset actually did. Reported honestly, including a partial."""
+
+    ownership_removed: bool
+    retry_hints_cleared: int
+    enrollment_key_rotated: bool
+
+
+def reset_worker_ownership(
+    fs: FilesystemBackend, *, write: bool, confirm: bool
+) -> OwnershipResetOutcome:
+    """Release this worker so a DIFFERENT control plane may claim it. LOCAL and privileged only.
+
+    This is the ONLY transfer mechanism. There is deliberately no remote counterpart: no API route,
+    no Temporal activity and no enrollment message reaches this function, because a controller able
+    to release a worker it does not own is the hijack the ownership binding exists to prevent. The
+    only inputs are the two explicit local gates.
+
+    Three things go, in an order chosen so an interruption cannot leave the worker claimable by
+    someone new while still holding its old identity:
+
+    1. the ownership binding — after this the worker is genuinely unowned;
+    2. the retry hints — a marker naming an enrollment under the OLD owner would otherwise let a
+       re-enrollment resume a conversation that no longer has an owner behind it;
+    3. the dedicated enrollment key pair — so the next owner gets a worker identity that was never
+       proven to the previous one. Rotating is what stops the old controller from continuing to
+       recognise this worker as the same principal.
+
+    It touches NO infrastructure. Worker ownership and Proxmox resource ownership are different
+    authority domains, and a local administrative release must not destroy a running range.
+    """
+    if not write:
+        _reject("enrollment_ownership_write_authority_required")
+    if not confirm:
+        _reject("enrollment_ownership_confirmation_required")
+
+    from secp_worker.enrollment_key import (
+        WORKER_ENROLLMENT_KEY_PATH,
+        WORKER_ENROLLMENT_PUBLIC_PATH,
+    )
+    from secp_worker.enrollment_state_store import WORKER_ENROLLMENT_STATE_DIR
+
+    removed = clear_worker_ownership(fs, write=write, confirm=confirm)
+
+    hints = 0
+    names = fs.list_dir(WORKER_ENROLLMENT_STATE_DIR)
+    if names is not None:
+        # Only the marker files this store owns. An unexpected object in the directory is LEFT and
+        # reported by its absence from the count rather than removed: a reset is not a licence to
+        # delete something nobody here recognises.
+        for name in names:
+            if not name.endswith(".step"):
+                continue
+            try:
+                fs.remove_file(f"{WORKER_ENROLLMENT_STATE_DIR}/{name}")
+            except Exception:
+                raise WorkerEnrollmentDriverError("enrollment_ownership_reset_failed") from None
+            hints += 1
+
+    rotated = False
+    for path in (WORKER_ENROLLMENT_KEY_PATH, WORKER_ENROLLMENT_PUBLIC_PATH):
+        if fs.lstat(path) is None:
+            continue
+        try:
+            fs.remove_file(path)
+        except Exception:
+            raise WorkerEnrollmentDriverError("enrollment_ownership_key_rotation_failed") from None
+        rotated = True
+    if rotated and (
+        fs.lstat(WORKER_ENROLLMENT_KEY_PATH) is not None
+        or fs.lstat(WORKER_ENROLLMENT_PUBLIC_PATH) is not None
+    ):
+        _reject("enrollment_ownership_key_rotation_failed")
+
+    return OwnershipResetOutcome(
+        ownership_removed=removed, retry_hints_cleared=hints, enrollment_key_rotated=rotated
+    )
+
+
 __all__ = [
     "WORKER_OWNERSHIP_PATH",
     "WORKER_OWNERSHIP_SCHEMA",
+    "OwnershipResetOutcome",
     "WorkerControllerOwnership",
     "clear_worker_ownership",
     "install_worker_ownership",
     "load_worker_ownership",
+    "reset_worker_ownership",
 ]

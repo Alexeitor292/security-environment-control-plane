@@ -51,13 +51,15 @@ class _FakeEnroller:
         self.error = error
         self.calls: list[str] = []
 
-    def enroll(self, invitation, *, now):
+    def enroll(self, invitation, *, now, expected_controller_key_id=None):
+        self.expected_controller_key_id = expected_controller_key_id
         self.calls.append("enroll")
         if self.error:
             raise _DriverError(self.error)
         return {"enrollment_id": invitation["enrollment_id"], "state": "healthy", "revision": 5}
 
-    def retry(self, invitation, *, now):
+    def retry(self, invitation, *, now, expected_controller_key_id=None):
+        self.expected_controller_key_id = expected_controller_key_id
         self.calls.append("retry")
         if self.error:
             raise _DriverError(self.error)
@@ -234,14 +236,59 @@ def test_the_production_composition_is_real_and_provisions_the_protected_key():
     fs = InMemoryFilesystem()
     enroller = build_worker_enroller(fs)
 
+    # The production composition is REAL, so the ownership gate now runs first. Supplying the
+    # operator-channel expected key is what lets this test reach the transport it is actually
+    # about — an unowned worker with no independent controller identity refuses before the network,
+    # which the assertion below pins separately.
+    expected = _INVITATION["controller_key_id"]
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
-        enroller.enroll(_INVITATION, now="2026-07-27T00:00:00+00:00")
+        enroller.enroll(
+            _INVITATION,
+            now="2026-07-27T00:00:00+00:00",
+            expected_controller_key_id=expected,
+        )
 
     assert ei.value.reason_code == "enrollment_transport_failed"
     # the sealed default could never have got this far: the key seam really ran
     assert observe_local_worker_enrollment_key(fs)
     # and nothing was recorded, because no exchange step completed
     assert enroller.status(_INVITATION)["state"] == "unknown"
+
+
+def test_the_real_composition_refuses_an_unowned_worker_with_no_independent_identity():
+    """The production composition wires a REAL ownership store, so the gate is live end to end.
+
+    Asserted through `build_worker_enroller` rather than a hand-built driver: a gate that only
+    engages in a bespoke composition is a gate production does not have.
+    """
+    from secp_commissioning.runtime import InMemoryFilesystem
+    from secp_management.worker_enroller import build_worker_enroller
+    from secp_worker.enrollment_driver import WorkerEnrollmentDriverError
+    from secp_worker.enrollment_key import observe_local_worker_enrollment_key
+
+    fs = InMemoryFilesystem()
+    enroller = build_worker_enroller(fs)
+
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        enroller.enroll(_INVITATION, now="2026-07-27T00:00:00+00:00")
+    assert ei.value.reason_code == "enrollment_ownership_expected_controller_required"
+    # refused BEFORE the key seam ran, so nothing local was created either
+    assert not observe_local_worker_enrollment_key(fs)
+
+
+def test_the_real_composition_refuses_a_wrong_independent_identity_before_network():
+    from secp_commissioning.runtime import InMemoryFilesystem
+    from secp_management.worker_enroller import build_worker_enroller
+    from secp_worker.enrollment_driver import WorkerEnrollmentDriverError
+
+    enroller = build_worker_enroller(InMemoryFilesystem())
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        enroller.enroll(
+            _INVITATION,
+            now="2026-07-27T00:00:00+00:00",
+            expected_controller_key_id="sha256:" + "9" * 64,
+        )
+    assert ei.value.reason_code == "enrollment_ownership_expected_controller_mismatch"
 
 
 def test_an_invitation_without_a_ca_refuses_before_the_key_seam_runs():
@@ -280,7 +327,8 @@ def test_the_production_composition_builds_one_driver_per_invitation():
         def __init__(self, inputs) -> None:
             self.inputs = inputs
 
-        def enroll(self, inputs, *, now):
+        def enroll(self, inputs, *, now, expected_controller_key_id=None):
+            self.expected_controller_key_id = expected_controller_key_id
             from secp_worker.enrollment_driver import DriverOutcome
 
             return DriverOutcome(inputs.enrollment_id, "healthy", revision=5, already_healthy=False)
