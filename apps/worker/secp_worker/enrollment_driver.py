@@ -342,10 +342,12 @@ class WorkerEnrollmentDriver:
         _status, bind_body = self._retry(lambda: transport.submit_binding(invitation))
         offer = _require_offer(bind_body)
         offer_claim, offer_att = self._verify_offer(invitation, signer.worker_key_id, offer)
-        # Bind ownership from the VERIFIED offer claim, not from the invitation. The claim is what
-        # the controller's key actually signed; the invitation is what an attacker would have
-        # supplied. They agree here only because `_verify_offer` just proved they must.
-        owner = self._bind_ownership(owner, offer_claim, signer.worker_key_id)
+        # Bind ownership from the VERIFIED OWNERSHIP claim — not from the invitation, and not from
+        # the offer. The offer authenticates the exchange but says nothing about the organization
+        # or the TLS trust anchor; the ownership claim signs both, and its anchor is checked
+        # against the one this worker actually negotiated.
+        ownership_claim = self._verify_ownership_claim(invitation, signer.worker_key_id, bind_body)
+        owner = self._bind_ownership(owner, ownership_claim, signer.worker_key_id)
         self._state_store.record(invitation.enrollment_id, _STEP_OFFER_VERIFIED)
 
         # OBSERVE (never fabricate) the health evidence from actual bounded local observations. A
@@ -436,10 +438,95 @@ class WorkerEnrollmentDriver:
             _reject("enrollment_ownership_controller_origin_mismatch")
         return owner
 
+    def _verify_ownership_claim(
+        self,
+        invitation: EnrollmentInvitationInputs,
+        worker_key_id: str,
+        body: dict,
+    ) -> dict:
+        """Verify the controller-signed OWNERSHIP claim, and prove the CA was not swapped.
+
+        This is the half the offer signature cannot cover. A proxying attacker presents the real
+        controller's ``controller_key_id``, forwards the exchange so every existing signature
+        verifies, and swaps only the TLS CA — terminating the connection itself. Nothing in the
+        offer says anything about the CA, so nothing caught it.
+
+        The claim is verified under the SAME independently-trusted controller key the ownership gate
+        already established, and then its ``controller_trust_anchor_id`` is compared against the
+        anchor this worker ACTUALLY negotiated — recomputed here from the bundle the transport built
+        its TLS context from, not read back out of the claim. A proxy that swapped the CA cannot
+        make those agree without the controller's signing key.
+        """
+        from secp_commissioning.enrollment_attestation import (
+            OWNERSHIP_KIND,
+            controller_ownership_claim,
+        )
+        from secp_commissioning.trust_anchor import TrustAnchorError, trust_anchor_id_for
+
+        signed = body.get("signed_ownership") if isinstance(body, dict) else None
+        if not isinstance(signed, dict):
+            _reject("enrollment_ownership_claim_missing")
+        claim = signed.get("claim")
+        att_fields = signed.get("attestation")
+        if not isinstance(claim, dict) or not isinstance(att_fields, dict):
+            _reject("enrollment_ownership_claim_malformed")
+        try:
+            att = DetachedAttestation(
+                algorithm=att_fields["algorithm"],
+                key_id=att_fields["key_id"],
+                public_key_hex=att_fields["public_key_hex"],
+                signature=att_fields["signature"],
+            )
+        except (KeyError, TypeError):
+            _reject("enrollment_ownership_claim_malformed")
+
+        # The anchor this worker really negotiated. Computed from the bundle the transport used —
+        # never taken from the claim, or the comparison below would be the claim agreeing with
+        # itself.
+        try:
+            observed_anchor = trust_anchor_id_for(invitation.controller_ca_bundle_pem)
+        except TrustAnchorError:
+            _reject("enrollment_ownership_trust_anchor_unreadable")
+
+        try:
+            verify_detached(
+                att,
+                expected_key_id=invitation.controller_key_id,
+                domain=ENROLLMENT_ATTESTATION_DOMAIN,
+                kind=OWNERSHIP_KIND,
+                digest=claim_digest(claim),
+            )
+        except AttestationError:
+            _reject("enrollment_ownership_claim_signature_invalid")
+
+        # REBUILD to verify: the claim must be exactly the one this exchange implies, with the
+        # observed anchor in it. A claim carrying a different anchor produces different bytes, so it
+        # cannot have been signed by the controller for THIS connection.
+        expected = controller_ownership_claim(
+            organization_id=str(claim.get("organization_id", "")),
+            controller_installation_id=invitation.controller_installation_id,
+            controller_key_id=invitation.controller_key_id,
+            controller_origin=invitation.controller_origin,
+            controller_trust_anchor_id=observed_anchor,
+            worker_key_id=worker_key_id,
+            enrollment_id=invitation.enrollment_id,
+            invitation_id=invitation.invitation_id,
+            controller_transaction_id=invitation.controller_transaction_id,
+            release_digest=invitation.release_digest,
+            predecessor_digest=str(claim.get("predecessor_digest", "")),
+        )
+        if claim_digest(claim) != claim_digest(expected):
+            # The single most likely cause is a swapped CA: every other input is one the gate has
+            # already pinned or the invitation already fixed.
+            _reject("enrollment_ownership_trust_anchor_mismatch")
+        if not str(claim.get("organization_id", "")).strip():
+            _reject("enrollment_ownership_claim_malformed")
+        return claim
+
     def _bind_ownership(
         self,
         owner: WorkerControllerOwnership | None,
-        offer_claim: dict,
+        ownership_claim: dict,
         worker_key_id: str,
     ) -> WorkerControllerOwnership:
         """Persist the owner, or prove the existing one still holds. Never best-effort.
@@ -461,9 +548,11 @@ class WorkerEnrollmentDriver:
         )
 
         candidate = WorkerControllerOwnership(
-            controller_installation_id=str(offer_claim["controller_installation_id"]),
-            controller_key_id=str(offer_claim["controller_key_id"]),
-            controller_origin=str(offer_claim["controller_origin"]),
+            organization_id=str(ownership_claim["organization_id"]),
+            controller_installation_id=str(ownership_claim["controller_installation_id"]),
+            controller_key_id=str(ownership_claim["controller_key_id"]),
+            controller_origin=str(ownership_claim["controller_origin"]),
+            controller_trust_anchor_id=str(ownership_claim["controller_trust_anchor_id"]),
             worker_key_id=worker_key_id,
             binding_generation=owner.binding_generation if owner is not None else 1,
         )

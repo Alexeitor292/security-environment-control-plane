@@ -34,6 +34,8 @@ from secp_worker.worker_ownership import (
 
 CTRL_KEY = "sha256:" + "a" * 64
 WORKER_KEY = "sha256:" + "b" * 64
+ORG = "11111111-1111-1111-1111-111111111111"
+ANCHOR = "sha256:" + "e" * 64
 
 
 def _fs() -> InMemoryFilesystem:
@@ -44,9 +46,11 @@ def _fs() -> InMemoryFilesystem:
 
 def _owner(**over) -> WorkerControllerOwnership:
     base = dict(
+        organization_id=ORG,
         controller_installation_id="controller-aaaaaaaa",
         controller_key_id=CTRL_KEY,
         controller_origin="https://ctrl.example.test",
+        controller_trust_anchor_id=ANCHOR,
         worker_key_id=WORKER_KEY,
     )
     base.update(over)
@@ -79,6 +83,7 @@ def test_an_absent_document_reads_as_genuinely_unowned():
             {k: v for k, v in _owner().canonical().items() if k != "worker_key_id"}
         ).encode(),
         json.dumps({**_owner().canonical(), "controller_key_id": ""}).encode(),
+        json.dumps({**_owner().canonical(), "controller_trust_anchor_id": ""}).encode(),
         json.dumps({**_owner().canonical(), "controller_key_id": "   "}).encode(),
         json.dumps({**_owner().canonical(), "controller_key_id": 7}).encode(),
         json.dumps({**_owner().canonical(), "binding_generation": 0}).encode(),
@@ -165,9 +170,12 @@ def test_rebinding_the_identical_owner_is_idempotent():
 @pytest.mark.parametrize(
     "field,value",
     [
+        ("organization_id", "22222222-2222-2222-2222-222222222222"),
         ("controller_installation_id", "controller-bbbbbbbb"),
         ("controller_key_id", "sha256:" + "c" * 64),
         ("controller_origin", "https://attacker.example.test"),
+        # the CA swap a proxying attacker performs — write-once like every other identity
+        ("controller_trust_anchor_id", "sha256:" + "f" * 64),
         ("worker_key_id", "sha256:" + "d" * 64),
     ],
 )

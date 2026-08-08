@@ -28,26 +28,31 @@ whole point of the module:
 Never "corrupt, therefore unowned". An attacker who can damage a file must not thereby be able to
 hand the worker to a different control plane.
 
-WHAT IT HOLDS, AND WHAT IT DELIBERATELY DOES NOT
---------------------------------------------------
+WHAT IT HOLDS
+--------------
 PUBLIC identities only — no private key, no pairing secret, no credential, no token.
 
-It pins EXACTLY the four controller/worker identities the controller's offer signature actually
-covers, verified by reading ``controller_offer_claim``'s field list rather than assumed:
-``controller_installation_id``, ``controller_key_id``, ``controller_origin`` and ``worker_key_id``.
+Every field is one a controller SIGNATURE covers. That is the rule the record is built around, and
+it is why the shape changed between v1 and v2 rather than simply growing:
 
-It does NOT yet pin the organization, the deployment site, or the controller's TLS trust anchor.
-Those three are absent from every signed claim in the current exchange, and pinning a value merely
-because it arrived beside a valid signature is the defect this module exists to prevent — an
-attacker who substitutes the CA while transparently proxying the real controller would otherwise
-get their anchor permanently pinned on the strength of the real controller's signature over fields
-that say nothing about it. Adding them requires a controller-signed ownership claim under its own
-attestation ``kind``; until that exists, pinning them would be a binding this worker cannot
-actually verify.
+* **v1** pinned the four identities the controller OFFER claim covers — installation, signing key,
+  origin, worker key. It stopped controller SUBSTITUTION: an attacker supplying their own
+  invitation supplies their own ``controller_key_id``, and an owned worker refuses before any
+  packet leaves the host.
+* **v2** adds ``organization_id`` and ``controller_trust_anchor_id``, which the offer claim does
+  NOT cover. They became pinnable only when the controller began signing them, in a
+  domain-separated ownership claim of its own ``kind`` — see
+  :func:`secp_commissioning.enrollment_attestation.controller_ownership_claim`.
 
-What v1 does protect against is controller SUBSTITUTION, which is the hijack: an attacker
-supplying their own invitation supplies their own ``controller_key_id``, and an owned worker
-refuses before any packet leaves the host.
+The trust anchor is what closes the remaining hole. A PROXYING attacker presents the real
+controller's signing key id, forwards the exchange so every signature verifies, and swaps only the
+CA — terminating TLS itself. v1 could not see that, because no signature said anything about the
+CA. v2 pins the anchor the controller signed and the worker compares it against the one it
+ACTUALLY negotiated.
+
+A v1 document is REFUSED rather than upgraded in place. An in-place upgrade would have to invent
+the two new values, and inventing an unverified trust anchor is the exact defect this record
+exists to prevent. The operator path is the local reset, and the refusal names it.
 
 The storage contract is the one :mod:`secp_worker.enrollment_key` already established for the
 protected key pair, reusing its checker rather than restating it: root-owned 0700 parent, 0600
@@ -81,16 +86,21 @@ _MAX_OWNERSHIP_BYTES = 16 * 1024
 
 #: The document's own schema tag. A record written by a future, differently-shaped version is
 #: refused as corrupt rather than partially understood.
-WORKER_OWNERSHIP_SCHEMA = "secp.worker-enrollment.local-ownership/v1"
+WORKER_OWNERSHIP_SCHEMA = "secp.worker-enrollment.local-ownership/v2"
+#: The superseded shape. Recognised ONLY so the refusal can name the local reset an operator needs,
+#: instead of reporting a v1 record as unreadable corruption.
+WORKER_OWNERSHIP_SCHEMA_V1 = "secp.worker-enrollment.local-ownership/v1"
 
 #: Every field of the binding, in the order a reviewer reads them. Used to validate an on-disk
 #: document exactly: a missing key and an unexpected key are both refusals, so a document cannot
 #: acquire meaning nothing here understands.
 _OWNERSHIP_FIELDS = (
     "schema",
+    "organization_id",
     "controller_installation_id",
     "controller_key_id",
     "controller_origin",
+    "controller_trust_anchor_id",
     "worker_key_id",
     "binding_generation",
 )
@@ -104,9 +114,13 @@ def _reject(reason_code: str) -> None:
 class WorkerControllerOwnership:
     """Who owns this worker. PUBLIC identities only; frozen so a loaded record cannot be edited."""
 
+    organization_id: str
     controller_installation_id: str
     controller_key_id: str
     controller_origin: str
+    #: The identity of the CA set this worker must keep seeing. Signed by the controller and
+    #: compared against the anchor actually negotiated, so a CA-swapping proxy fails here.
+    controller_trust_anchor_id: str
     worker_key_id: str
     #: Increments only through an explicit LOCAL reset followed by a new enrollment. It exists so an
     #: operator can tell a re-claimed worker from one that was never reset, and it is deliberately
@@ -137,10 +151,21 @@ def _decode(raw: bytes) -> WorkerControllerOwnership:
         parsed = json.loads(raw)
     except (ValueError, UnicodeDecodeError):
         raise WorkerEnrollmentDriverError("enrollment_ownership_corrupt") from None
-    if not isinstance(parsed, dict) or set(parsed) != set(_OWNERSHIP_FIELDS):
+    if not isinstance(parsed, dict):
         _reject("enrollment_ownership_corrupt")
+    # SCHEMA FIRST, then the field set. A v1 record has a v1 field set, so checking shape first
+    # would report a legitimately-enrolled worker as corrupt and send its operator hunting for
+    # damage that is not there.
+    if parsed.get("schema") == WORKER_OWNERSHIP_SCHEMA_V1:
+        # Distinguished from unknown corruption on purpose: a v1 record is a worker that WAS
+        # legitimately enrolled before the trust anchor was pinnable. It cannot be upgraded here —
+        # that would mean inventing an unverified anchor — so the operator runs the local reset and
+        # re-enrolls, and this reason code says so.
+        _reject("enrollment_ownership_superseded_schema")
     if parsed.get("schema") != WORKER_OWNERSHIP_SCHEMA:
         _reject("enrollment_ownership_schema_unknown")
+    if set(parsed) != set(_OWNERSHIP_FIELDS):
+        _reject("enrollment_ownership_corrupt")
     generation = parsed.get("binding_generation")
     if not isinstance(generation, int) or isinstance(generation, bool) or generation < 1:
         _reject("enrollment_ownership_corrupt")

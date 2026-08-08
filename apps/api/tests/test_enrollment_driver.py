@@ -31,10 +31,43 @@ from secp_worker.enrollment_key import WORKER_ENROLLMENT_ROOT
 
 NOW = "2026-07-26T00:00:00+00:00"
 FUTURE = "2999-01-01T00:00:00+00:00"
-# a grammar-valid controller CA chain; the driver's transport is a double, so no socket is opened
-CA_PEM = (
-    "-----BEGIN CERTIFICATE-----\nMIIBfakeCAforTESTS0000000000000==\n-----END CERTIFICATE-----\n"
-)
+
+
+def _self_signed_ca(common_name: str = "secp-test-ca") -> str:
+    """A REAL parseable CA. The transport is still a double — no socket is opened.
+
+    It has to be real now: the ownership claim binds the trust-anchor identity, and that identity is
+    derived by PARSING the bundle. The previous grammar-valid placeholder could not be parsed, so a
+    fake CA would make the anchor comparison untestable — and that comparison is the one thing
+    closing CA substitution.
+    """
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    start = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(start)
+        .not_valid_after(start + datetime.timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+
+CA_PEM = _self_signed_ca()
+#: A DIFFERENT real CA — what a proxying attacker would terminate TLS with.
+ATTACKER_CA_PEM = _self_signed_ca("attacker-ca")
 
 
 def _invitation(controller_pub: str, **over) -> EnrollmentInvitationInputs:
@@ -72,6 +105,10 @@ class _FakeController:
         transient_binds: int = 0,
         result_status: int = 200,
         result_enrollment: dict | None = None,
+        organization_id: str = "11111111-1111-1111-1111-111111111111",
+        trust_anchor_id: str | None = None,
+        ownership_signer_priv: str | None = None,
+        omit_ownership: bool = False,
     ) -> None:
         self._signer = signer
         self._controller_priv = controller_priv
@@ -83,6 +120,12 @@ class _FakeController:
         self._result_status = result_status
         # the AUTHORITATIVE enrollment head the controller reports on the result (default healthy)
         self._result_enrollment = result_enrollment or {"state": "healthy", "revision": 5}
+        self._organization_id = organization_id
+        # `trust_anchor_id` overrides the honestly-derived anchor, so a test can simulate a
+        # CA-swapping proxy: the claim says one anchor, the worker computes another.
+        self._trust_anchor_id = trust_anchor_id
+        self._ownership_priv = ownership_signer_priv
+        self._omit_ownership = omit_ownership
 
     def submit_binding(self, invitation: EnrollmentInvitationInputs) -> tuple[int, dict]:
         if self._transient_binds > 0:
@@ -138,10 +181,48 @@ class _FakeController:
                 "signature": offer_att.signature,
             },
         }
-        return 200, {
+        # The controller ALSO mints the domain-separated ownership claim, binding the two facts
+        # the offer cannot: the organization and the TLS trust anchor the worker must keep seeing.
+        from secp_commissioning.trust_anchor import trust_anchor_id_for
+
+        ownership_claim = ea.controller_ownership_claim(
+            organization_id=self._organization_id,
+            controller_installation_id=invitation.controller_installation_id,
+            controller_key_id=invitation.controller_key_id,
+            controller_origin=invitation.controller_origin,
+            controller_trust_anchor_id=(
+                self._trust_anchor_id
+                if self._trust_anchor_id is not None
+                else trust_anchor_id_for(invitation.controller_ca_bundle_pem)
+            ),
+            worker_key_id=self._signer.worker_key_id,
+            enrollment_id=invitation.enrollment_id,
+            invitation_id=invitation.invitation_id,
+            controller_transaction_id=invitation.controller_transaction_id,
+            release_digest=invitation.release_digest,
+            predecessor_digest="sha256:" + "b" * 64,
+        )
+        ownership_att = ea.sign_detached(
+            self._ownership_priv or self._offer_priv,
+            domain=ea.ENROLLMENT_ATTESTATION_DOMAIN,
+            kind=ea.OWNERSHIP_KIND,
+            digest=ea.claim_digest(ownership_claim),
+        )
+        body = {
             "signed_offer": signed_offer,
             "enrollment": {"state": "offer_transported", "revision": 2},
         }
+        if not self._omit_ownership:
+            body["signed_ownership"] = {
+                "claim": ownership_claim,
+                "attestation": {
+                    "algorithm": ownership_att.algorithm,
+                    "key_id": ownership_att.key_id,
+                    "public_key_hex": ownership_att.public_key_hex,
+                    "signature": ownership_att.signature,
+                },
+            }
+        return 200, body
 
     def submit_result(
         self,
@@ -509,3 +590,114 @@ def test_an_expired_invitation_is_refused():
     with pytest.raises(WorkerEnrollmentDriverError) as ei:
         driver.enroll(inv, now=NOW, expected_controller_key_id=_expected(cpub))
     assert ei.value.reason_code == "enrollment_invitation_expired"
+
+
+# === CA / trust-anchor substitution — the half #147 could not close ==============================
+
+
+def test_a_proxying_attacker_who_swaps_the_ca_is_refused_and_persists_nothing():
+    """THE test this slice exists for.
+
+    The attacker presents the REAL controller's key id and forwards the exchange, so the offer
+    signature verifies exactly as it should — that is what makes this attack invisible to every
+    check that existed before. What it cannot do is make the controller sign an anchor for a CA the
+    controller does not serve, so the worker's own computation disagrees.
+    """
+    from secp_worker.worker_ownership import load_worker_ownership
+
+    cpriv, cpub = generate_keypair()
+    fs = _ownership_fs()
+    driver = _driver(
+        cpriv,
+        cpub,
+        ownership_store=fs,
+        # the claim names the anchor for a CA the worker is NOT actually using
+        trust_anchor_id="sha256:" + "9" * 64,
+    )
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
+    assert ei.value.reason_code == "enrollment_ownership_trust_anchor_mismatch"
+    # nothing was written: a refused enrollment must not leave a half-claimed worker
+    assert load_worker_ownership(fs) is None
+
+
+def test_swapping_the_actual_ca_bundle_is_refused():
+    """The same attack from the other direction: the claim is honest, the connection is not.
+
+    Here the controller signs the anchor for the CA it really serves, and the worker was handed a
+    DIFFERENT bundle — which is what a substituted invitation plus a terminating proxy looks like.
+    """
+    cpriv, cpub = generate_keypair()
+    fs = _ownership_fs()
+    controllers = []
+
+    def factory(signer, invitation):
+        # the controller signs the anchor of the REAL CA, not the one the worker was given
+        c = _FakeController(
+            signer,
+            controller_priv=cpriv,
+            controller_pub=cpub,
+            trust_anchor_id=__import__(
+                "secp_commissioning.trust_anchor", fromlist=["trust_anchor_id_for"]
+            ).trust_anchor_id_for(CA_PEM),
+        )
+        controllers.append(c)
+        return c
+
+    wpriv, _ = generate_keypair()
+    driver = WorkerEnrollmentDriver(
+        ownership_store=fs,
+        key_seam=_KeySeam(wpriv),
+        transport_factory=factory,
+        state_store=InMemoryWorkerEnrollmentStateStore(),
+        health_observer=_FakeObserver(),
+    )
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        driver.enroll(
+            _invitation(cpub, controller_ca_bundle_pem=ATTACKER_CA_PEM),
+            now=NOW,
+            expected_controller_key_id=_expected(cpub),
+        )
+    assert ei.value.reason_code == "enrollment_ownership_trust_anchor_mismatch"
+
+
+def test_a_missing_ownership_claim_refuses():
+    """A controller that does not sign ownership cannot enrol a worker.
+
+    Fail-closed on absence, not "skip the check when it is not offered" — which is how an attacker
+    downgrades a protocol by simply omitting the part that inconveniences them.
+    """
+    cpriv, cpub = generate_keypair()
+    driver = _driver(cpriv, cpub, omit_ownership=True)
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
+    assert ei.value.reason_code == "enrollment_ownership_claim_missing"
+
+
+def test_an_ownership_claim_signed_by_a_different_key_refuses():
+    """The claim must be signed by the INDEPENDENTLY trusted controller key, like the offer."""
+    cpriv, cpub = generate_keypair()
+    other_priv, _other_pub = generate_keypair()
+    driver = _driver(cpriv, cpub, ownership_signer_priv=other_priv)
+    with pytest.raises(WorkerEnrollmentDriverError) as ei:
+        driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
+    assert ei.value.reason_code == "enrollment_ownership_claim_signature_invalid"
+
+
+def test_a_successful_enrollment_pins_the_organization_and_the_trust_anchor():
+    """The positive case: what actually gets written after the whole chain verifies."""
+    from secp_commissioning.trust_anchor import trust_anchor_id_for
+    from secp_worker.worker_ownership import load_worker_ownership
+
+    cpriv, cpub = generate_keypair()
+    fs = _ownership_fs()
+    driver = _driver(cpriv, cpub, ownership_store=fs)
+    outcome = driver.enroll(_invitation(cpub), now=NOW, expected_controller_key_id=_expected(cpub))
+    assert outcome.state == "healthy"
+
+    owner = load_worker_ownership(fs)
+    assert owner is not None
+    assert owner.organization_id == "11111111-1111-1111-1111-111111111111"
+    # the pinned anchor is the one derived from the bundle actually in use
+    assert owner.controller_trust_anchor_id == trust_anchor_id_for(CA_PEM)
+    assert owner.controller_key_id == ea.key_id_for(cpub)

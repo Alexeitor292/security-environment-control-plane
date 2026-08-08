@@ -44,10 +44,15 @@ ENROLLMENT_ATTESTATION_DOMAIN = "secp.worker-enrollment.exchange/v1"
 POP_KIND = "worker-enrollment-binding-pop"
 OFFER_KIND = "worker-enrollment-controller-offer"
 RESULT_KIND = "worker-enrollment-result"
+#: The OWNERSHIP claim's kind. A DISTINCT kind produces distinct signed bytes through
+#: ``attestation_message``, so the ``/v1`` offer schema and every existing signature over it are
+#: untouched — no signed canonical form changes meaning while keeping its identifier.
+OWNERSHIP_KIND = "worker-enrollment-controller-ownership"
 #: The canonical schema tags for the three structured claims.
 BINDING_SCHEMA = "secp.worker-enrollment.binding/v1"
 OFFER_SCHEMA = "secp.worker-enrollment.offer/v1"
 RESULT_SCHEMA = "secp.worker-enrollment.result/v1"
+OWNERSHIP_SCHEMA = "secp.worker-enrollment.ownership/v1"
 #: Domain separator for the dedicated-enrollment-key proof-of-possession handle (see
 #: ``enrollment_key_proof_id_for``) — distinct from any signed-message domain.
 _ENROLLMENT_KEY_PROOF_DOMAIN = b"secp/controller-enrollment-key-proof/v1"
@@ -250,6 +255,56 @@ def controller_offer_claim(
     }
 
 
+def controller_ownership_claim(
+    *,
+    organization_id: str,
+    controller_installation_id: str,
+    controller_key_id: str,
+    controller_origin: str,
+    controller_trust_anchor_id: str,
+    worker_key_id: str,
+    enrollment_id: str,
+    invitation_id: str,
+    controller_transaction_id: str,
+    release_digest: str,
+    predecessor_digest: str,
+) -> dict[str, str]:
+    """The canonical claim a worker PERMANENTLY pins as "who owns me".
+
+    WHY A SEPARATE KIND RATHER THAN MORE FIELDS ON THE OFFER
+    ---------------------------------------------------------
+    The offer claim authenticates the enrollment EXCHANGE. Read its field list: it covers neither
+    the organization nor the controller's TLS trust anchor. Those are exactly the facts an ownership
+    binding must not take on trust, because a *proxying* attacker presents the real controller's
+    signing key id, forwards the exchange so every signature verifies, and swaps only the CA. No
+    existing signature says anything about the CA, so nothing catches it.
+
+    Adding the fields to ``OFFER_SCHEMA`` was the alternative and is refused: changing which bytes a
+    ``/v1`` identifier covers, while keeping the identifier, makes every existing statement about
+    signed-byte compatibility false. A new ``kind`` changes the signed bytes through
+    :func:`attestation_message` and leaves the offer untouched.
+
+    ``controller_trust_anchor_id`` is the load-bearing field. The worker compares it against the
+    anchor it ACTUALLY negotiated (:func:`secp_commissioning.trust_anchor.trust_anchor_id_for` over
+    the bundle it built its TLS context from), so a signature obtained through a CA-swapping proxy
+    fails the comparison rather than authorising the swap.
+    """
+    return {
+        "schema": OWNERSHIP_SCHEMA,
+        "organization_id": organization_id,
+        "controller_installation_id": controller_installation_id,
+        "controller_key_id": controller_key_id,
+        "controller_origin": controller_origin,
+        "controller_trust_anchor_id": controller_trust_anchor_id,
+        "worker_key_id": worker_key_id,
+        "enrollment_id": enrollment_id,
+        "invitation_id": invitation_id,
+        "controller_transaction_id": controller_transaction_id,
+        "release_digest": release_digest,
+        "predecessor_digest": predecessor_digest,
+    }
+
+
 def enrollment_key_proof_id_for(public_key_hex: str) -> str:
     """A deterministic, bounded, PUBLIC proof-of-possession handle for the dedicated controller
     enrollment key, derived from its public key with domain separation. It is the persisted
@@ -303,11 +358,14 @@ __all__ = [
     "BINDING_SCHEMA",
     "ENROLLMENT_ATTESTATION_DOMAIN",
     "OFFER_KIND",
+    "OWNERSHIP_KIND",
+    "OWNERSHIP_SCHEMA",
     "OFFER_SCHEMA",
     "POP_KIND",
     "REQUIRED_HEALTH_CHECKS",
     "RESULT_KIND",
     "RESULT_SCHEMA",
+    "controller_ownership_claim",
     "WORKER_RESULT_OUTCOME_HEALTHY",
     "AttestationError",
     "DetachedAttestation",

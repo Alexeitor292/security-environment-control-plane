@@ -61,10 +61,37 @@ OFFER_DIGEST = "sha256:" + "c" * 64
 NOW = "2026-07-30T00:00:00+00:00"
 FUTURE = "2999-01-01T00:00:00+00:00"
 BOOTSTRAP_DIR = "/var/lib/secp/bootstrap"
+
+
 # a grammar-valid controller CA chain; these tests never open a socket, so no real key is needed
-CA_PEM = (
-    "-----BEGIN CERTIFICATE-----\nMIIBfakeCAforTESTS0000000000000==\n-----END CERTIFICATE-----\n"
-)
+def _self_signed_ca(common_name: str = "secp-test-ca") -> str:
+    """A REAL parseable CA — the ownership claim binds the trust-anchor identity, which is derived
+    by parsing the bundle. The transport is still a double; no socket is opened."""
+    import datetime
+
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.x509.oid import NameOID
+
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, common_name)])
+    start = datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC)
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(name)
+        .issuer_name(name)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(start)
+        .not_valid_after(start + datetime.timedelta(days=3650))
+        .add_extension(x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(key, hashes.SHA256())
+    )
+    return cert.public_bytes(serialization.Encoding.PEM).decode()
+
+
+CA_PEM = _self_signed_ca()
 
 # The two seeded documents are built from the management plane's OWN strict models and serialized
 # through their own ``canonical()`` — never hand-rolled here. ``read_installed_worker_record``
@@ -624,7 +651,42 @@ class _FakeController:
                     "signature": att.signature,
                 },
             },
+            "signed_ownership": self._signed_ownership(invitation),
             "enrollment": {"state": "offer_transported", "revision": 2},
+        }
+
+    def _signed_ownership(self, invitation: EnrollmentInvitationInputs) -> dict:
+        """The controller also signs the ownership claim, binding the organization and the TLS
+        trust anchor — the two facts the offer claim does not cover."""
+        from secp_commissioning.trust_anchor import trust_anchor_id_for
+
+        claim = ea.controller_ownership_claim(
+            organization_id="11111111-1111-1111-1111-111111111111",
+            controller_installation_id=invitation.controller_installation_id,
+            controller_key_id=invitation.controller_key_id,
+            controller_origin=invitation.controller_origin,
+            controller_trust_anchor_id=trust_anchor_id_for(invitation.controller_ca_bundle_pem),
+            worker_key_id=self._signer.worker_key_id,
+            enrollment_id=invitation.enrollment_id,
+            invitation_id=invitation.invitation_id,
+            controller_transaction_id=invitation.controller_transaction_id,
+            release_digest=invitation.release_digest,
+            predecessor_digest="sha256:" + "b" * 64,
+        )
+        att = ea.sign_detached(
+            self._priv,
+            domain=ea.ENROLLMENT_ATTESTATION_DOMAIN,
+            kind=ea.OWNERSHIP_KIND,
+            digest=ea.claim_digest(claim),
+        )
+        return {
+            "claim": claim,
+            "attestation": {
+                "algorithm": att.algorithm,
+                "key_id": att.key_id,
+                "public_key_hex": att.public_key_hex,
+                "signature": att.signature,
+            },
         }
 
     def submit_result(
