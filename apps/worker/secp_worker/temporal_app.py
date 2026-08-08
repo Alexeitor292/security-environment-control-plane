@@ -119,7 +119,7 @@ async def discover_activity(arg: dict) -> str:
     from secp_api.models import ProviderInventorySnapshot, WorkflowRun
 
     from secp_worker.discovery import build_provider_plugin, run_discovery
-    from secp_worker.secrets import EnvSecretResolver
+    from secp_worker.secrets import SealedProviderSecretResolver
 
     snapshot_id = uuid.UUID(arg["snapshot_id"])
     run_id = _opt_uuid(arg.get("workflow_run_id"))
@@ -131,9 +131,12 @@ async def discover_activity(arg: dict) -> str:
             run = session.get(WorkflowRun, run_id)
             if run is not None:
                 run.status = WorkflowStatus.running
-        # Real secret resolution happens here, in the worker, just-in-time.
+        # Secret resolution happens here, in the worker, just-in-time — and the SHIPPED resolver
+        # refuses. This used to construct `EnvSecretResolver`, so a production Proxmox credential
+        # could come from an environment variable; a deployment with no trusted backend composed
+        # now terminates as unavailable BEFORE target contact instead of falling back to os.environ.
         plugin = build_provider_plugin(snap.plugin_name)
-        run_discovery(session, snapshot_id, plugin=plugin, resolver=EnvSecretResolver())
+        run_discovery(session, snapshot_id, plugin=plugin, resolver=SealedProviderSecretResolver())
         if run_id is not None:
             run = session.get(WorkflowRun, run_id)
             if run is not None:
