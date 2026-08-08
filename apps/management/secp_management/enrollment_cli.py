@@ -615,7 +615,8 @@ def worker_ownership_reset(deps: EnrollmentCliDeps, *, gate: WriteGate) -> tuple
                     owner.controller_installation_id if owner is not None else ""
                 ),
             }
-        outcome = reset_worker_ownership(fs, write=True, confirm=gate.is_confirmed)
+        # `gate.is_write` is already `write AND confirm`, so both gates are proven set here.
+        outcome = reset_worker_ownership(fs, write=True, confirm=True)
     except Exception as exc:  # noqa: BLE001 - bounded reason codes only
         reason = getattr(exc, "reason_code", None)
         if isinstance(reason, str):

@@ -23,7 +23,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import NoReturn, Protocol
+from typing import TYPE_CHECKING, NoReturn, Protocol
 
 from secp_commissioning.canonical import is_sha256_digest
 from secp_commissioning.enrollment_attestation import (
@@ -44,6 +44,11 @@ from secp_worker.enrollment_http_transport import (
     SealedEnrollmentTransport,
     WorkerEnrollmentSigner,
 )
+
+if TYPE_CHECKING:  # type-only, so the worker package keeps its lazy-import posture
+    from secp_commissioning.runtime import FilesystemBackend
+
+    from secp_worker.worker_ownership import WorkerControllerOwnership
 
 _MAX_ATTEMPTS = 3
 _STEP_OFFER_VERIFIED = "offer_verified"
@@ -281,7 +286,7 @@ class WorkerEnrollmentDriver:
         # The hardened filesystem the durable ownership document lives on. `None` is NOT "unowned"
         # — the gate refuses without it, because a driver that cannot read the binding must not act
         # as though there is none.
-        ownership_store: object | None = None,
+        ownership_store: FilesystemBackend | None = None,
     ) -> None:
         self._key_seam = key_seam or SealedWorkerEnrollmentKeySeam()
         self._transport_factory = transport_factory
@@ -387,7 +392,7 @@ class WorkerEnrollmentDriver:
         self,
         invitation: EnrollmentInvitationInputs,
         expected_controller_key_id: str | None,
-    ) -> object | None:
+    ) -> WorkerControllerOwnership | None:
         """Settle ownership before any network contact. Returns the current owner, or ``None``.
 
         Two paths, and neither can be reached from the other:
@@ -406,11 +411,12 @@ class WorkerEnrollmentDriver:
         """
         from secp_worker.worker_ownership import load_worker_ownership
 
-        if self._ownership_store is None:
+        store = self._ownership_store
+        if store is None:
             # No ownership seam wired: the driver cannot prove who owns this worker, so it must not
             # act as though nobody does. The shipped composition supplies the real store.
             _reject("enrollment_ownership_store_unavailable")
-        owner = load_worker_ownership(self._ownership_store)
+        owner = load_worker_ownership(store)
 
         if owner is None:
             if not expected_controller_key_id or not expected_controller_key_id.strip():
@@ -431,8 +437,11 @@ class WorkerEnrollmentDriver:
         return owner
 
     def _bind_ownership(
-        self, owner: object | None, offer_claim: dict, worker_key_id: str
-    ) -> object:
+        self,
+        owner: WorkerControllerOwnership | None,
+        offer_claim: dict,
+        worker_key_id: str,
+    ) -> WorkerControllerOwnership:
         """Persist the owner, or prove the existing one still holds. Never best-effort.
 
         Runs AFTER the offer signature verifies and BEFORE the worker reports healthy. If the write
@@ -456,12 +465,15 @@ class WorkerEnrollmentDriver:
             controller_key_id=str(offer_claim["controller_key_id"]),
             controller_origin=str(offer_claim["controller_origin"]),
             worker_key_id=worker_key_id,
-            binding_generation=getattr(owner, "binding_generation", 1),
+            binding_generation=owner.binding_generation if owner is not None else 1,
         )
         if owner is not None and not owner.matches(candidate):
             # The gate already compared the invitation; this compares what was actually SIGNED.
             _reject("enrollment_ownership_signed_offer_mismatch")
-        return install_worker_ownership(self._ownership_store, candidate)
+        store = self._ownership_store
+        if store is None:  # pragma: no cover - the gate refuses first; re-narrowed for the checker
+            _reject("enrollment_ownership_store_unavailable")
+        return install_worker_ownership(store, candidate)
 
     def _retry(self, call: Callable[[], tuple[int, dict]]) -> tuple[int, dict]:
         """Send a request, re-sending the IDENTICAL call on a transient failure (transport error or
