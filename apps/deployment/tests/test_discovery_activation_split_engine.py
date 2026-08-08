@@ -221,7 +221,7 @@ def _controller_after(profile, tls) -> ControllerObservation:  # noqa: ANN001
             image_digest=profile.admission_proxy_runtime_image_digest,
             service="discovery-admission-proxy",
         ),
-        migration_head="e3b7a9c25f41",
+        migration_head="7c2f4b8d1a6e",
         migration_head_ready=True,
         configuration_artifact_digests=tuple(
             split_engine._controller_digests(rendered, tls).items()
@@ -1156,7 +1156,7 @@ def test_status_reports_staged_journals_and_receiptless_runtime_as_recovery() ->
     migration_only = ControllerObservation(
         inspected=True,
         coherent=True,
-        migration_head="e3b7a9c25f41",
+        migration_head="7c2f4b8d1a6e",
         migration_head_ready=True,
     )
     controller.before = migration_only

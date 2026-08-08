@@ -51,8 +51,11 @@ def test_pr5h_head_chains_linearly_from_the_pr5f_base() -> None:
     revisions, _ = _revision_graph()
     assert RUNTIME_REQUIRED_MIGRATION_HEAD in revisions
     # linear: d8f1a2b3c4e5 -> b6e2f4a9c1d7 -> c2f8e1a4b6d9 -> a1d4f7c2e9b6 -> e3b7a9c25f41
+    #         -> 7c2f4b8d1a6e
     head_src = open(os.path.join(_VERSIONS, revisions[RUNTIME_REQUIRED_MIGRATION_HEAD])).read()
-    assert re.search(r'^down_revision[^=]*=\s*"a1d4f7c2e9b6"', head_src, re.M)
+    assert re.search(r'^down_revision[^=]*=\s*"e3b7a9c25f41"', head_src, re.M)
+    selected_worker_src = open(os.path.join(_VERSIONS, revisions["e3b7a9c25f41"])).read()
+    assert re.search(r'^down_revision[^=]*=\s*"a1d4f7c2e9b6"', selected_worker_src, re.M)
     b2_src = open(os.path.join(_VERSIONS, revisions["a1d4f7c2e9b6"])).read()
     assert re.search(r'^down_revision[^=]*=\s*"c2f8e1a4b6d9"', b2_src, re.M)
     b1_src = open(os.path.join(_VERSIONS, revisions["c2f8e1a4b6d9"])).read()

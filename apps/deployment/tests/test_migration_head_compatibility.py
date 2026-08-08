@@ -24,6 +24,7 @@ from secp_discovery_activation.migration_heads import (
     PR5H_A_CONTROLLER_MIGRATION_HEAD,
     PR5H_B1_CONTROLLER_MIGRATION_HEAD,
     PR5H_B2_CONTROLLER_MIGRATION_HEAD,
+    SELECTED_WORKER_CONTROLLER_MIGRATION_HEAD,
     accepted_heads_match_literal,
     is_accepted_controller_migration_head,
 )
@@ -38,15 +39,19 @@ def test_window_contains_the_supported_rolling_heads() -> None:
         "c2f8e1a4b6d9",
         "a1d4f7c2e9b6",
         "e3b7a9c25f41",
+        "7c2f4b8d1a6e",
     )
     assert LEGACY_CONTROLLER_MIGRATION_HEAD == "d8f1a2b3c4e5"
     assert PR5H_A_CONTROLLER_MIGRATION_HEAD == "b6e2f4a9c1d7"
     assert PR5H_B1_CONTROLLER_MIGRATION_HEAD == "c2f8e1a4b6d9"
     assert PR5H_B2_CONTROLLER_MIGRATION_HEAD == "a1d4f7c2e9b6"
-    assert CURRENT_CONTROLLER_MIGRATION_HEAD == "e3b7a9c25f41"
-    # the window stays BOUNDED and closed — never open-ended
-    assert len(ACCEPTED_CONTROLLER_MIGRATION_HEADS) == 5
-    assert len(set(ACCEPTED_CONTROLLER_MIGRATION_HEADS)) == 5
+    assert SELECTED_WORKER_CONTROLLER_MIGRATION_HEAD == "e3b7a9c25f41"
+    assert CURRENT_CONTROLLER_MIGRATION_HEAD == "7c2f4b8d1a6e"
+    # the window stays BOUNDED and closed — never open-ended. It grows by exactly one per landed
+    # migration and shrinks only through an explicit deprecation change, so a widening that is not
+    # accompanied by a head advance fails here.
+    assert len(ACCEPTED_CONTROLLER_MIGRATION_HEADS) == 6
+    assert len(set(ACCEPTED_CONTROLLER_MIGRATION_HEADS)) == 6
 
 
 def test_literal_and_tuple_never_drift() -> None:
