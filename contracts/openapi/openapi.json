@@ -1482,10 +1482,11 @@
         "type": "object"
       },
       "CredentialPurposeClass": {
-        "description": "The credential purpose classes a binding may serve (B1B-PR5A adds operation separation).\n\nTwo distinct real-plan purposes exist:\n\n* ``provider_plan_read`` — the READ-ONLY provider (Proxmox) credential used to generate a plan.\n  By declared purpose it is non-mutating; least privilege is NOT claimed from the label alone —\n  the actual scope must be backed by reviewed activation-dossier evidence.\n* ``state_backend_plan`` — the SEPARATE remote-state-backend credential. It is never the same\n  binding as the provider credential and never falls back to the generic ``secret_ref``.\n\n**Apply and destroy credential purposes remain unrepresentable** — absent from this enum, so no\ncaller can mint an apply/destroy credential binding. Each purpose sources its own dedicated\nopaque\nreference and rotates independently.",
+        "description": "The credential purpose classes a binding may serve (B1B-PR5A adds operation separation).\n\nTwo distinct real-plan purposes exist:\n\n* ``provider_plan_read`` — the READ-ONLY provider (Proxmox) credential used to generate a plan.\n  By declared purpose it is non-mutating; least privilege is NOT claimed from the label alone —\n  the actual scope must be backed by reviewed activation-dossier evidence.\n* ``state_backend_plan`` — the SEPARATE remote-state-backend credential. It is never the same\n  binding as the provider credential and never falls back to the generic ``secret_ref``.\n\n* ``provider_execution`` — the credential that PERFORMS Proxmox mutations (SECP-M1-B).\n\nEach purpose sources its own dedicated opaque reference and rotates independently. No purpose\nfalls back to another, and none falls back to the generic ``secret_ref``.",
         "enum": [
           "provider_plan_read",
-          "state_backend_plan"
+          "state_backend_plan",
+          "provider_execution"
         ],
         "title": "CredentialPurposeClass",
         "type": "string"

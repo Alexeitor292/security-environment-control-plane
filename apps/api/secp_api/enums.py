@@ -1462,15 +1462,23 @@ class CredentialPurposeClass(str, Enum):
     * ``state_backend_plan`` — the SEPARATE remote-state-backend credential. It is never the same
       binding as the provider credential and never falls back to the generic ``secret_ref``.
 
-    A third purpose, ``provider_execution``, was added by SECP-M1-B under explicit owner
-    authorization: the durable-authority execution path needs a credential that PERFORMS mutations,
-    and the previous "apply and destroy remain unrepresentable" rule made that unreachable rather
-    than merely gated. It is deliberately narrow — one dedicated reference, one worker-side
-    resolution purpose — and is NOT a generic caller-selectable mutation credential.
+    * ``provider_execution`` — the credential that PERFORMS Proxmox mutations (SECP-M1-B).
 
     Each purpose sources its own dedicated opaque reference and rotates independently. No purpose
     falls back to another, and none falls back to the generic ``secret_ref``.
     """
+
+    # This docstring is PUBLISHED: it becomes the OpenAPI `description` for this enum and reaches
+    # every generated client, so the maintenance rationale lives here as a comment instead.
+    #
+    # `provider_execution` supersedes the prior "apply and destroy purposes remain unrepresentable"
+    # rule, for this one narrow purpose only, under explicit owner authorization. That rule made a
+    # mutation credential unreachable rather than merely gated, so the durable-authority execution
+    # path had no credential it could legitimately use and fell back to the generic `secret_ref` —
+    # the very substitution the separation exists to prevent. It is deliberately narrow: one
+    # dedicated reference (`ExecutionTarget.provider_execution_secret_ref`), one worker-side
+    # resolution purpose (`proxmox_provider_execution`), and NOT a caller-selectable "mutation
+    # credential".
 
     provider_plan_read = "provider_plan_read"
     state_backend_plan = "state_backend_plan"
