@@ -712,39 +712,120 @@ def _assert_toolchain_and_activation(
     return profile
 
 
-def _resolve_lab_secret_env(
+def _default_provider_execution_resolver():
+    """The SHIPPED provider-execution resolver: purpose-bound, sealed until a backend is composed.
+
+    Mirrors `proxmox_discovery_runtime`'s discovery factory rather than inventing a second shape.
+    `client=None` is the shipped state and fails CLOSED — a deployment with no trusted secret
+    backend refuses before target contact instead of falling back to anything.
+
+    The purpose is fixed HERE, at construction, not taken from a caller. A resolver whose purpose an
+    argument could choose would let a discovery operation request an apply credential by naming one.
+    """
+    from secp_worker.preflight.proxmox_secret_resolver import ProxmoxOperationSecretResolver
+    from secp_worker.preflight.secret_resolution import ResolutionPurpose
+
+    return ProxmoxOperationSecretResolver(
+        purpose=ResolutionPurpose.proxmox_provider_execution, client=None
+    )
+
+
+def _resolve_lab_secret_env(  # noqa: PLR0913 - one parameter per authority/identity input
     session,
     operation: ProvisioningOperation,
     target: ExecutionTarget,
     kind: ProvisioningOperationKind,
     secret_resolver,
+    authority=None,
 ) -> dict[str, str]:
-    """Worker-only, just-in-time secret resolution for mutating operations.
+    """Worker-only, just-in-time resolution of the MUTATION credential. Purpose-bound throughout.
 
-    Dry runs use placeholder input variables (no secret needed). Apply/destroy require
-    a resolver and a configured secret reference; the resolved token is used to build
-    ``TF_VAR_*`` env and is never persisted, hashed, or logged un-redacted.
+    AUTHORITY FIRST, THEN THE CREDENTIAL
+    -------------------------------------
+    ``authority`` is the ``AuthorizedExecution`` already derived from durable rows. It is required
+    here and the ordering is the point: possession of a credential is not permission to use it, so
+    the credential is resolved only for an operation that has ALREADY been authorized, and the
+    request is bound to that exact operation. Resolving first and authorizing after would mean a
+    live secret existed in the process for an execution that was never permitted.
+
+    NO FALLBACK, IN ANY DIRECTION
+    ------------------------------
+    The reference comes from ``ExecutionTarget.provider_execution_secret_ref`` alone. The generic
+    ``secret_ref`` — which the legacy discovery and live-readonly paths resolve — cannot satisfy it,
+    and neither can the plan-read or state-backend references. A missing dedicated reference
+    REFUSES; it does not degrade to whichever reference happens to be present, which is exactly how
+    a read-only credential would become the apply credential.
+
+    What replaced what: this used to resolve ``target.secret_ref`` through a duck-typed
+    ``resolve(str)`` protocol with no purpose at all. Any object with a ``.resolve`` method
+    satisfied it.
     """
     if kind not in (ProvisioningOperationKind.apply, ProvisioningOperationKind.destroy):
+        # A dry run plans with placeholder input variables and needs no credential at all.
         return {}
-    from secp_worker.provisioning.activation import build_lab_secret_env
 
-    if secret_resolver is None:
+    from secp_api.credential_binding import (
+        RealPlanCredentialError,
+        require_provider_execution_credential_reference,
+    )
+
+    from secp_worker.plan_gen.secret_env import build_provider_plan_env
+    from secp_worker.preflight.secret_resolution import (
+        ResolutionContractViolation,
+        SecretResolutionUnavailable,
+        TrustedCredentialReference,
+        build_provider_execution_resolution_request,
+    )
+
+    if authority is None:
+        # No durable authority means no real execution is about to happen — the development and
+        # simulator path runs NOTHING. So no credential is resolved at all, which is stronger than
+        # resolving a fake one: there is no live material in the process for an execution that was
+        # never authorized. The old path resolved `target.secret_ref` here regardless.
+        return {}
+    try:
+        reference = require_provider_execution_credential_reference(target)
+    except RealPlanCredentialError:
         _refuse_real(
             session,
             operation,
-            "no secret resolver available for worker-only just-in-time resolution",
+            "target has no dedicated provider-execution credential reference; the generic and "
+            "read-only references can never satisfy a mutation",
         )
-    if not target.secret_ref:
-        _refuse_real(session, operation, "target has no secret reference configured")
+
+    request, expectation = build_provider_execution_resolution_request(
+        organization_id=operation.organization_id,
+        execution_target_id=target.id,
+        worker_installation_id=authority.worker_installation_id,
+        operation_identity=str(authority.operation_id),
+        operation_generation=int(operation.attempts or 1),
+        credential_reference=TrustedCredentialReference(reference),
+    )
+    resolver = (
+        secret_resolver if secret_resolver is not None else (_default_provider_execution_resolver())
+    )
     try:
-        credential = secret_resolver.resolve(target.secret_ref)
-        token = credential.reveal_secret()
+        from datetime import UTC, datetime
+
+        material = resolver.resolve(request, expectation=expectation, now=datetime.now(UTC))
+    except (ResolutionContractViolation, SecretResolutionUnavailable) as exc:
+        # Bounded reason codes only — never the reference, the backend response or the raw error.
+        _refuse_real(session, operation, f"provider-execution credential unavailable: {exc}")
     except ProvisioningRefusedError:
         raise
     except Exception:
-        _refuse_real(session, operation, "secret resolution failed (redacted)")
-    return build_lab_secret_env(target.config, token)
+        _refuse_real(
+            session, operation, "provider-execution credential resolution failed (redacted)"
+        )
+
+    # The canonical projection: SecretMaterial only, allowlisted variable name, control-character
+    # and size checks. Reused rather than re-hand-writing `TF_VAR_pm_api_token`, which is how the
+    # old path bypassed every one of those checks.
+    env = build_provider_plan_env(material)
+    endpoint = str((target.config or {}).get("base_url", ""))
+    if endpoint:
+        env["TF_VAR_pm_endpoint"] = endpoint  # non-secret
+    return env
 
 
 def _render_once(session, operation: ProvisioningOperation, manifest, profile):
@@ -907,7 +988,17 @@ def run_real_provisioning(
             active_onboarding_for_target(session, target.id), require_live=True
         )
 
-    secret_env = _resolve_lab_secret_env(session, operation, target, kind, secret_resolver)
+    # Taken FROM the executor, not threaded alongside it: this guarantees the credential is bound
+    # to the same authority that produced the thing about to run. A separately-passed authority
+    # could, after a refactor, describe a different operation than the executor was built for.
+    secret_env = _resolve_lab_secret_env(
+        session,
+        operation,
+        target,
+        kind,
+        secret_resolver,
+        getattr(process_executor, "authority", None),
+    )
     runner = OpenTofuRunner(
         process_executor,
         profile=profile.content,
