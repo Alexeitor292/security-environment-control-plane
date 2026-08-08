@@ -1462,14 +1462,23 @@ class CredentialPurposeClass(str, Enum):
     * ``state_backend_plan`` — the SEPARATE remote-state-backend credential. It is never the same
       binding as the provider credential and never falls back to the generic ``secret_ref``.
 
-    **Apply and destroy credential purposes remain unrepresentable** — absent from this enum, so no
-    caller can mint an apply/destroy credential binding. Each purpose sources its own dedicated
-    opaque
-    reference and rotates independently.
+    A third purpose, ``provider_execution``, was added by SECP-M1-B under explicit owner
+    authorization: the durable-authority execution path needs a credential that PERFORMS mutations,
+    and the previous "apply and destroy remain unrepresentable" rule made that unreachable rather
+    than merely gated. It is deliberately narrow — one dedicated reference, one worker-side
+    resolution purpose — and is NOT a generic caller-selectable mutation credential.
+
+    Each purpose sources its own dedicated opaque reference and rotates independently. No purpose
+    falls back to another, and none falls back to the generic ``secret_ref``.
     """
 
     provider_plan_read = "provider_plan_read"
     state_backend_plan = "state_backend_plan"
+    #: SECP-M1-B. The credential that PERFORMS Proxmox mutations, sourced ONLY from the dedicated
+    #: ``ExecutionTarget.provider_execution_secret_ref`` and mapping ONLY to the worker-side
+    #: ``ResolutionPurpose.proxmox_provider_execution``. Deliberately narrow: it is not a generic
+    #: "mutation credential" a caller may select, and no other purpose falls back to it.
+    provider_execution = "provider_execution"
 
 
 class CredentialBindingSource(str, Enum):

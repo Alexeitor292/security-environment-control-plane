@@ -28,9 +28,10 @@ from sqlalchemy.orm import Session
 #: The chain, in order: ``b6e2f4a9c1d7`` (PR5H-A foundation) -> ``c2f8e1a4b6d9`` (PR5H-B1
 #: controller-identity history) -> ``a1d4f7c2e9b6`` (PR5H-B2 durable controller-identity activation
 #: receipt) -> ``e3b7a9c25f41`` (SECP-M1, the provisioning operation's selected worker, ADR-030
-#: condition 2). The required live head advances with each, so this value is the LAST of them —
+#: condition 2) -> ``7c2f4b8d1a6e`` (SECP-M1-B, the dedicated provider-execution credential
+#: reference). The required live head advances with each, so this value is the LAST of them —
 #: not the one the surrounding prose happens to describe at greatest length.
-RUNTIME_REQUIRED_MIGRATION_HEAD: Final = "e3b7a9c25f41"
+RUNTIME_REQUIRED_MIGRATION_HEAD: Final = "7c2f4b8d1a6e"
 
 
 class EnrollmentSchemaError(RuntimeError):
