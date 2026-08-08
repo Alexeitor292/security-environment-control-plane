@@ -161,8 +161,9 @@ def test_image_smoke_expected_alembic_head_tracks_the_actual_sole_head() -> None
     the shipped image's sole Alembic head, but its ``_EXPECTED_ALEMBIC_HEAD`` constant is hardcoded
     and was left at a stale head when a new sole head was introduced. The head has since advanced
     ``b6e2f4a9c1d7 -> c2f8e1a4b6d9 -> a1d4f7c2e9b6 -> e3b7a9c25f41 -> 7c2f4b8d1a6e``
-    (PR5H-A -> B1 -> B2 -> M1 -> M1-B), so this pin tracks ``7c2f4b8d1a6e``. The smoke runs only inside the built container in CI, so this was invisible to
-    every local suite. This local pin fails the moment the constant drifts from the real head."""
+    (PR5H-A -> B1 -> B2 -> M1 -> M1-B), so this pin tracks ``7c2f4b8d1a6e``. The smoke runs only
+    inside the built container in CI, so this was invisible to every local suite. This local pin
+    fails the moment the constant drifts from the real head."""
     import importlib.util
 
     from alembic.config import Config
