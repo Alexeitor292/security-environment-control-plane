@@ -30,12 +30,22 @@ independently-rotating opaque credential selections:
   falling back to the generic ``secret_ref`` for simulated/dev compatibility. (A real-plan gate
   additionally REQUIRES the dedicated column and refuses the generic fallback.)
 * ``state_backend_plan`` — sourced ONLY from the dedicated
-``ExecutionTarget.state_backend_secret_ref``
-  (never the generic ``secret_ref``).
+``ExecutionTarget.state_backend_secret_ref`` (never the generic ``secret_ref``).
+
+**SECP-M1-B** adds a third, under explicit owner authorization:
+
+* ``provider_execution`` — the credential that PERFORMS mutations, sourced ONLY from the dedicated
+  ``ExecutionTarget.provider_execution_secret_ref``. No generic fallback, in either accessor.
+
+That last point is the whole reason the column exists. Before it, the only reachable apply
+credential was the generic ``secret_ref`` — the same column the legacy discovery and live-readonly
+paths resolve — so a read-only credential could silently become the mutation credential. A missing
+dedicated reference now REFUSES rather than degrading to something that happens to be present.
 
 Each purpose has its own versioned binding; changing one reference rotates only its matching
-binding.
-Apply and destroy purposes are unrepresentable, so no apply/destroy binding can ever be created.
+binding. The prior rule that apply/destroy purposes are unrepresentable is superseded for this one
+narrow purpose only: it is not a caller-selectable "mutation credential", and nothing falls back
+to it.
 """
 
 from __future__ import annotations
@@ -97,6 +107,12 @@ def purpose_reference(target: ExecutionTarget, purpose_class: CredentialPurposeC
         return getattr(target, "provider_plan_secret_ref", None) or target.secret_ref
     if purpose_class is CredentialPurposeClass.state_backend_plan:
         return getattr(target, "state_backend_secret_ref", None)
+    if purpose_class is CredentialPurposeClass.provider_execution:
+        # NO generic fallback, unlike `provider_plan_read`. The mutation credential must never be
+        # reachable through `secret_ref` — that is the same column the legacy discovery and
+        # live-readonly paths resolve, so a fallback here is exactly "a read-only credential
+        # silently became the apply credential".
+        return getattr(target, "provider_execution_secret_ref", None)
     return None  # pragma: no cover - defensive; no other purpose is representable
 
 
@@ -112,6 +128,8 @@ def dedicated_reference(
         return getattr(target, "provider_plan_secret_ref", None)
     if purpose_class is CredentialPurposeClass.state_backend_plan:
         return getattr(target, "state_backend_secret_ref", None)
+    if purpose_class is CredentialPurposeClass.provider_execution:
+        return getattr(target, "provider_execution_secret_ref", None)
     return None  # pragma: no cover - defensive; no other purpose is representable
 
 
@@ -137,6 +155,20 @@ def require_real_plan_credential_reference(
     if not ref:
         raise RealPlanCredentialError(f"{purpose_class.value}_reference_missing")
     return ref
+
+
+def require_provider_execution_credential_reference(target: ExecutionTarget) -> str:
+    """The DEDICATED mutation-credential reference, or raise. Never a fallback of any kind.
+
+    A thin sibling of :func:`require_real_plan_credential_reference` rather than a second
+    implementation: both refuse unless the purpose's own dedicated reference is present, and having
+    one function do both under a name that says "real plan" would make the execution call site read
+    as something it is not.
+
+    Credential possession is not execution authority. This is called only AFTER the durable
+    authority for the operation has been established, never as a way of deciding whether it may be.
+    """
+    return require_real_plan_credential_reference(target, CredentialPurposeClass.provider_execution)
 
 
 def active_credential_binding(

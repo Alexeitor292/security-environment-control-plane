@@ -4914,13 +4914,13 @@ export interface components {
          *     * ``state_backend_plan`` — the SEPARATE remote-state-backend credential. It is never the same
          *       binding as the provider credential and never falls back to the generic ``secret_ref``.
          *
-         *     **Apply and destroy credential purposes remain unrepresentable** — absent from this enum, so no
-         *     caller can mint an apply/destroy credential binding. Each purpose sources its own dedicated
-         *     opaque
-         *     reference and rotates independently.
+         *     * ``provider_execution`` — the credential that PERFORMS Proxmox mutations (SECP-M1-B).
+         *
+         *     Each purpose sources its own dedicated opaque reference and rotates independently. No purpose
+         *     falls back to another, and none falls back to the generic ``secret_ref``.
          * @enum {string}
          */
-        CredentialPurposeClass: "provider_plan_read" | "state_backend_plan";
+        CredentialPurposeClass: "provider_plan_read" | "state_backend_plan" | "provider_execution";
         /** DecisionBody */
         DecisionBody: {
             /**

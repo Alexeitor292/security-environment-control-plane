@@ -52,7 +52,7 @@ def client(engine, principal):
 
     # the durable enrollment service refuses unless the live schema head is the required one; the
     # ORM ``create_all`` does not manage ``alembic_version``, so stamp it here (as production
-    # migrations would). ``e3b7a9c25f41`` is the current sole head (SECP-M1).
+    # migrations would). ``7c2f4b8d1a6e`` is the current sole head (SECP-M1).
     with engine.begin() as conn:
         conn.exec_driver_sql(
             "CREATE TABLE IF NOT EXISTS alembic_version (version_num varchar(32) primary key)"
