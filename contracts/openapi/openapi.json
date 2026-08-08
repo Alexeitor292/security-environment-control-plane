@@ -413,10 +413,14 @@
           },
           "signed_offer": {
             "$ref": "#/components/schemas/SignedControllerOfferOut"
+          },
+          "signed_ownership": {
+            "$ref": "#/components/schemas/SignedControllerOfferOut"
           }
         },
         "required": [
           "signed_offer",
+          "signed_ownership",
           "enrollment"
         ],
         "title": "BindExchangeOut",

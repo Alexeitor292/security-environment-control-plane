@@ -51,6 +51,17 @@ _ROLE_PW = "signer-least-privilege-test-pw"  # noqa: S105 - a throwaway CI-local
 _PROOF_ID = "enrkp:" + "a" * 64  # a grammar-valid enrollment-key proof id for the lease type
 
 
+@pytest.fixture(autouse=True)
+def _stub_tls_trust_anchor_id(monkeypatch):
+    import secp_management.enrollment_signer_identity as signer_identity
+
+    monkeypatch.setattr(
+        signer_identity,
+        "_observe_tls_trust_anchor_id",
+        lambda: "sha256:" + "7" * 64,
+    )
+
+
 def _role_url() -> str:
     return (
         make_url(PG_URL).set(username=ROLE, password=_ROLE_PW).render_as_string(hide_password=False)
