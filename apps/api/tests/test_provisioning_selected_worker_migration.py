@@ -57,11 +57,19 @@ def _config(url: str) -> Config:
 # === the migration ================================================================================
 
 
-def test_the_revision_is_the_sole_head_and_descends_from_the_previous_one():
+def test_the_revision_sits_in_the_linear_chain_below_the_current_head():
+    """Renamed: this revision WAS the sole head; ``7c2f4b8d1a6e`` now is.
+
+    The property worth keeping is not "this is the head" — that expires every time a migration
+    lands — but that this revision is still exactly where it was in a chain that stayed linear.
+    Asserting it is the head would have to be edited on every future migration, and a test edited
+    that often stops being read.
+    """
     script = ScriptDirectory.from_config(_config("sqlite+pysqlite:///:memory:"))
-    assert tuple(script.get_heads()) == (REVISION,)
-    assert HEAD == REVISION
+    assert tuple(script.get_heads()) == (HEAD,)  # still exactly one head
+    assert HEAD != REVISION  # ...and it is no longer this one
     assert script.get_revision(REVISION).down_revision == PR5H_B2
+    assert script.get_revision(HEAD).down_revision == REVISION
 
 
 def test_upgrade_adds_the_column_and_downgrade_removes_it(tmp_path, monkeypatch):

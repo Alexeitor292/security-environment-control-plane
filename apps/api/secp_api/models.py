@@ -682,6 +682,12 @@ class ExecutionTarget(Base, TimestampMixin):
     # the generic ``secret_ref`` alone can never satisfy it.
     provider_plan_secret_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
     state_backend_secret_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # SECP-M1-B: the credential that PERFORMS mutations. Dedicated because every other reference
+    # here serves a read-only or state purpose, and before this column the only way to reach an
+    # apply credential was the generic ``secret_ref`` — the same one the legacy discovery and
+    # live-readonly paths resolve. NULL is honest and cannot execute; it is never defaulted from
+    # another reference, because copying one would manufacture an authorization nobody granted.
+    provider_execution_secret_ref: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[TargetStatus] = mapped_column(
         EnumType(TargetStatus), default=TargetStatus.active, nullable=False
     )
